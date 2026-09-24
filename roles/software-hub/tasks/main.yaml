@@ -1,0 +1,274 @@
+# Combined Software Hub Role
+# This role combines the functionality of:
+# - software-hub-prepare-cluster: Installing shared cluster components
+# - software-hub-prepare-instance: Preparing instance for Software Hub installation
+# - install-software-hub: Installing Software Hub instance
+#
+# Documentation references:
+# - https://www.ibm.com/docs/en/software-hub/5.3.x?topic=cluster-installing-shared-components
+# - https://www.ibm.com/docs/en/software-hub/5.3.x?topic=installing-preparing-install-instance-software-hub
+# - https://www.ibm.com/docs/en/software-hub/5.3.x?topic=installing-instance-software-hub
+
+---
+- name: Validate required variables for software-hub role
+  tags: install
+  ansible.builtin.assert:
+    that:
+      - entitlement_key is defined and entitlement_key | length > 0
+      - path_cpd_cli_workspace is defined and path_cpd_cli_workspace | length > 0
+    fail_msg: |
+      The following variables are required by the software-hub role but are missing or invalid.
+      Please configure them in vars/global.yaml:
+
+        entitlement_key         - IBM Entitlement Key for image pull secret creation
+                                  Current: {{ entitlement_key | default('NOT SET') }}
+
+        path_cpd_cli_workspace  - Local path to the cpd-cli workspace directory
+                                  Current: {{ path_cpd_cli_workspace | default('NOT SET') }}
+    success_msg: "software-hub variable validation passed"
+
+- name: Install and configure Software Hub
+  tags: install
+  block:
+
+    # # ========================================
+    # # Prepare Instance
+    # # ========================================
+
+    - name: Create Software Hub projects/namespaces
+      ansible.builtin.import_tasks: create-projects.yaml
+
+    - name: Download required case bundles
+      ansible.builtin.import_tasks: case-download.yaml
+
+    - name: Install Scheduler service
+      ansible.builtin.command: >
+        cpd-cli manage apply-scheduler
+        --release={{ cpd_version }}
+        --license_acceptance=true
+        --scheduler_ns={{ cpd_scheduler_ns }}
+      changed_when: false
+      when:
+        - ansible_architecture == "x86_64"
+        - not (skip_scheduler | default(false) | bool)
+
+    - name: Authorize namespace permissions for Software Hub
+      ansible.builtin.import_tasks: create-namespace-perms.yaml
+
+    - name: Install Licensing
+      ansible.builtin.command: >
+        cpd-cli manage apply-cluster-components
+        --release={{ cpd_version }}
+        --license_acceptance=true
+        --licensing_ns={{ licensing_ns }}
+      changed_when: false
+
+    - name: Create MCG secrets for Software Hub
+      ansible.builtin.import_tasks: create-mcg-secrets.yaml
+
+    # ========================================
+    # Install Software Hub
+    # ========================================
+    - name: Create image pull secrets
+      ansible.builtin.import_tasks: create-pull-secrets.yaml
+
+    - name: Accept License
+      ansible.builtin.command: >
+        cpd-cli manage get-license
+        --release={{ cpd_version }}
+        --license_types={{ software_hub_license_types }}
+      changed_when: false
+
+    - name: Check if patch folder exists in offline work directory
+      ansible.builtin.stat:
+        path: "{{ path_cpd_cli_workspace }}/work/offline/patch"
+      register: offline_patch_dir
+
+    - name: Delete patch folder from offline work directory
+      ansible.builtin.file:
+        path: "{{ path_cpd_cli_workspace }}/work/offline/patch"
+        state: absent
+      become: true
+      when: offline_patch_dir.stat.exists and offline_patch_dir.stat.isdir
+
+    # -------------------------------------------------------------------------
+    # Launch cpd-cli async so Ansible can monitor CRs mid-flight and then
+    # rejoin once everything is healthy.
+    # async: 14400 = 4-hour ceiling  |  poll: 0 = fire-and-forget
+    # -------------------------------------------------------------------------
+    - name: Launch cpd-cli install-components in background
+      ansible.builtin.command: >
+        cpd-cli manage install-components
+        --license_acceptance=true
+        --components=cpd_platform
+        --release={{ cpd_version }}
+        --operator_ns={{ cpd_operators_ns }}
+        --instance_ns={{ cpd_instance_ns }}
+        --block_storage_class={{ software_hub_block_storage_class }}
+        --file_storage_class={{ software_hub_file_storage_class }}
+        --image_pull_prefix={{ software_hub_image_pull_prefix }}
+        --image_pull_secret={{ software_hub_image_pull_secret }}
+      async: 14400
+      poll: 0
+      changed_when: false
+      register: install_swh_job
+
+    # Step 1 — ibmcpd CR appears early. Once present it creates the ZenService
+    # CR (lite-cr) and then blocks its own completion until ZenService finishes.
+    - name: Wait for ibmcpd CR to be present
+      ansible.builtin.command: >
+        oc get ibmcpd -n {{ cpd_instance_ns }} -o jsonpath='{.items[0].metadata.name}'
+      register: ibmcpd_cr_check
+      until: ibmcpd_cr_check.stdout | length > 0
+      retries: 60
+      delay: 30
+      changed_when: false
+
+    # Step 2 — ibmcpd creates the ZenService CR (lite-cr) after it appears.
+    # Gate on the CR existing before polling its status field — oc get returns
+    # a non-zero exit code if the resource is not found, which would fail the
+    # next step immediately instead of retrying.
+    - name: Wait for ZenService CR to be present
+      ansible.builtin.command: >
+        oc get zenservice lite-cr -n {{ cpd_instance_ns }} -o jsonpath='{.metadata.name}'
+      register: zenservice_cr_check
+      until: zenservice_cr_check.stdout | length > 0
+      retries: 60
+      delay: 30
+      changed_when: false
+
+    # Step 3 — poll ZenService until zenStatus: Completed.
+    # ibmcpd is internally blocked on this same condition; surfacing it here
+    # gives us visibility into the longest part of the install.
+    - name: Wait for ZenService CR to reach Completed status
+      ansible.builtin.command: >
+        oc get zenservice lite-cr -n {{ cpd_instance_ns }}
+        -o jsonpath='{.status.zenStatus}'
+      register: zenservice_status
+      until: zenservice_status.stdout == "Completed"
+      retries: 120
+      delay: 60
+      changed_when: false
+
+    # Step 4 — once ZenService is done, ibmcpd finishes its own reconciliation.
+    # Poll until controlPlaneStatus: Completed before rejoining cpd-cli.
+    - name: Wait for ibmcpd CR to reach Completed status
+      ansible.builtin.command: >
+        oc get ibmcpd -n {{ cpd_instance_ns }}
+        -o jsonpath='{.items[0].status.controlPlaneStatus}'
+      register: ibmcpd_status
+      until: ibmcpd_status.stdout == "Completed"
+      retries: 60
+      delay: 30
+      changed_when: false
+
+    # Step 5 — rejoin the background cpd-cli job — blocks until it exits.
+    # By this point ibmcpd controlPlaneStatus is already Completed (Step 4),
+    # so cpd-cli should exit within minutes. 20 retries × 30 s = 10-minute window.
+    # finished is an int (0/1); also stop early if the job has already failed.
+    - name: Wait for Software Hub installation to complete
+      ansible.builtin.async_status:
+        jid: "{{ install_swh_job.ansible_job_id }}"
+        mode: status
+      register: install_swh_result
+      until: install_swh_result.finished | int == 1
+      retries: 20
+      delay: 30
+      failed_when: install_swh_result.finished | int == 1 and install_swh_result.rc != 0
+
+    - name: Print cpd-cli install-components output
+      ansible.builtin.debug:
+        msg: "{{ install_swh_result.stdout_lines }}"
+
+    # -------------------------------------------------------------------------
+    # Retrieve and display admin credentials so the operator can log in.
+    # -------------------------------------------------------------------------
+    - name: Get Software Hub instance details and initial admin credentials
+      ansible.builtin.command: >
+        cpd-cli manage get-cpd-instance-details
+        --cpd_instance_ns={{ cpd_instance_ns }}
+        --get_admin_initial_credentials=true
+      changed_when: false
+      register: cpd_instance_details
+
+    - name: Display Software Hub instance details
+      ansible.builtin.debug:
+        msg: "{{ cpd_instance_details.stdout_lines }}"
+
+- name: Uninstall Software Hub
+  tags: uninstall
+  block:
+    - name: Delete image pull secrets
+      ansible.builtin.import_tasks: delete-pull-secrets.yaml
+
+    - name: Delete MCG secrets for Software Hub
+      ansible.builtin.import_tasks: delete-mcg-secrets.yaml
+
+    - name: Delete Software Hub projects/namespaces
+      ansible.builtin.import_tasks: delete-projects.yaml
+
+    - name: Remove finalizers from Software Hub resources
+      ansible.builtin.import_tasks: remove-finalizers.yaml
+
+    - name: Force-remove finalizers from cpd-instance-1 namespace if Terminating
+      ansible.builtin.shell: |
+        oc get namespace {{ cpd_instance_ns }} --no-headers 2>/dev/null | grep -q Terminating \
+          && oc patch namespace {{ cpd_instance_ns }} \
+               --type=merge -p '{"metadata":{"finalizers":[]}}' \
+          || true
+      ignore_errors: true
+      changed_when: false
+
+    - name: Force-remove finalizers from cpd-operators namespace if Terminating
+      ansible.builtin.shell: |
+        oc get namespace {{ cpd_operators_ns }} --no-headers 2>/dev/null | grep -q Terminating \
+          && oc patch namespace {{ cpd_operators_ns }} \
+               --type=merge -p '{"metadata":{"finalizers":[]}}' \
+          || true
+      ignore_errors: true
+      changed_when: false
+
+    - name: Delete ibm-licensing namespace and remove blocking finalizers
+      ansible.builtin.import_tasks: delete-ibm-licensing.yaml
+
+    # Wait for namespaces to be fully gone — pods are gone once namespace is removed
+    - name: Wait for cpd-instance-1 namespace to be fully removed
+      ansible.builtin.shell: |
+        oc get namespace {{ cpd_instance_ns }} --no-headers 2>/dev/null | wc -l
+      register: cpd_instance_pods
+      until: cpd_instance_pods.stdout | int == 0
+      retries: 60
+      delay: 10
+      ignore_errors: true
+      changed_when: false
+
+    - name: Re-run finalizer patches for cpd-instance-1 if namespace is still Terminating
+      ansible.builtin.shell: |
+        oc get namespace {{ cpd_instance_ns }} --no-headers 2>/dev/null | grep -q Terminating || exit 0
+        oc get authentications.operator.ibm.com -n {{ cpd_instance_ns }} -o name 2>/dev/null \
+          | xargs -r -I {} oc patch {} -n {{ cpd_instance_ns }} --type=merge -p '{"metadata":{"finalizers":[]}}'
+        oc get clients.oidc.security.ibm.com -n {{ cpd_instance_ns }} -o name 2>/dev/null \
+          | xargs -r -I {} oc patch {} -n {{ cpd_instance_ns }} --type=merge -p '{"metadata":{"finalizers":[]}}'
+        oc get operandbindinfos.operator.ibm.com -n {{ cpd_instance_ns }} -o name 2>/dev/null \
+          | xargs -r -I {} oc patch {} -n {{ cpd_instance_ns }} --type=merge -p '{"metadata":{"finalizers":[]}}'
+      when: cpd_instance_pods.attempts is defined and cpd_instance_pods.attempts | int >= 60
+      ignore_errors: true
+      changed_when: false
+
+    - name: Display cpd-instance-1 namespace removal status
+      ansible.builtin.debug:
+        msg: "{{ cpd_instance_ns }} namespace has {{ cpd_instance_pods.stdout }} entries remaining"
+
+    - name: Wait for cpd-operators namespace to be fully removed
+      ansible.builtin.shell: |
+        oc get namespace {{ cpd_operators_ns }} --no-headers 2>/dev/null | wc -l
+      register: cpd_operators_pods
+      until: cpd_operators_pods.stdout | int == 0
+      retries: 60
+      delay: 10
+      ignore_errors: true
+      changed_when: false
+
+    - name: Display cpd-operators namespace removal status
+      ansible.builtin.debug:
+        msg: "{{ cpd_operators_ns }} namespace has {{ cpd_operators_pods.stdout }} entries remaining"

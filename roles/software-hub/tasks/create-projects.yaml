@@ -1,0 +1,17 @@
+# Tasks in this file are from documentation provided here:
+# https://www.ibm.com/docs/en/software-hub/5.3.x?topic=hub-creating-required-projects-namespaces
+
+- name: Create OCP Project for Software Hub Operators
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', role_path + '/files/project-operators.yaml') | from_yaml }}"
+
+- name: Create OCP Project for Software Hub Operands
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', role_path + '/files/project-operands.yaml') | from_yaml }}"
+
+- name: Create OCP Project for Licensing
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', role_path + '/files/project-licensing.yaml') | from_yaml }}"

@@ -1,0 +1,9 @@
+apiVersion: operators.coreos.com/v1alpha2
+kind: OperatorGroup
+metadata:
+  name: wxa4z-operator-group
+  namespace: wxa4z-operator
+spec: {}
+  # targetNamespaces:
+  #   - wxa4z-zad
+  #   - wxa4z-aiops

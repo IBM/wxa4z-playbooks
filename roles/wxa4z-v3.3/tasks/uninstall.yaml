@@ -1,0 +1,614 @@
+---
+# ============================================================================
+# Complete Uninstall Tasks for wxa4z v3.3
+# ============================================================================
+# This file provides comprehensive cleanup matching the shell script's teardown
+# function. It handles:
+# - Multi-tenant namespace discovery and cleanup
+# - Force-deletion of all CRs across all namespaces
+# - Cluster-scoped RBAC cleanup
+# - CRD cleanup
+# - Stuck namespace handling
+#
+# Usage:
+#   ansible-playbook install-wxa4z-v3.3.yml --tags wxa4z-v3.3-complete-uninstall,uninstall
+# ============================================================================
+
+- name: Run complete uninstall for wxa4z-v3.3
+  tags: uninstall
+  block:
+
+    # ========================================================================
+    # Step 1: Kill the Operator First (Stop Reconciliation)
+    # ========================================================================
+    - name: "Step 1/7: Kill Operator (Stop Reconciliation)"
+      debug:
+        msg: "Deleting operator components to stop reconciliation..."
+
+    - name: Get wxa4z CSV name
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: wxa4z-operator
+        label_selectors:
+          - "operators.coreos.com/ibm-wxa4z-operator.wxa4z-operator"
+      register: wxa4z_csvs
+      ignore_errors: true
+
+    - name: Delete wxa4z CSVs
+      kubernetes.core.k8s:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: wxa4z-operator
+        name: "{{ item.metadata.name }}"
+        state: absent
+        wait: false
+      loop: "{{ wxa4z_csvs.resources | default([]) }}"
+      ignore_errors: true
+
+    - name: Delete all wxa4z Subscriptions
+      kubernetes.core.k8s:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        namespace: wxa4z-operator
+        state: absent
+        name: "{{ item }}"
+      loop:
+        - ibm-wxa4z-subscription
+      ignore_errors: true
+
+    - name: Delete all wxa4z CatalogSources
+      kubernetes.core.k8s:
+        api_version: operators.coreos.com/v1alpha1
+        kind: CatalogSource
+        namespace: wxa4z-operator
+        state: absent
+        name: "{{ item }}"
+      loop:
+        - ibm-wxa4z-operator-catalog
+      ignore_errors: true
+
+    - name: Delete all wxa4z OperatorGroups
+      kubernetes.core.k8s:
+        api_version: operators.coreos.com/v1alpha2
+        kind: OperatorGroup
+        namespace: wxa4z-operator
+        state: absent
+        name: "{{ item }}"
+      loop:
+        - wxa4z-operator-group
+      ignore_errors: true
+
+    - name: Force delete operator pods
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Pod
+        namespace: wxa4z-operator
+        state: absent
+        label_selectors:
+          - "app.kubernetes.io/name=ibm-wxa4z-operator"
+        delete_options:
+          gracePeriodSeconds: 0
+      ignore_errors: true
+
+    - name: Wait for operator to be fully gone
+      pause:
+        seconds: 5
+
+    # ========================================================================
+    # Step 2: Force-Delete All Custom Resources Across All Namespaces
+    # ========================================================================
+    - name: "Step 2/7: Force-Delete All Custom Resources"
+      debug:
+        msg: "Removing finalizers and deleting all CRs across all namespaces..."
+
+    - name: Get all ZragTenant CRs across all namespaces
+      kubernetes.core.k8s_info:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: ZragTenant
+      register: zragtenants_all
+      ignore_errors: true
+
+    - name: Force delete all ZragTenant CRs
+      kubernetes.core.k8s:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: ZragTenant
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: patched
+        definition:
+          metadata:
+            finalizers: []
+      loop: "{{ zragtenants_all.resources | default([]) }}"
+      ignore_errors: true
+
+    - name: Delete all ZragTenant CRs
+      kubernetes.core.k8s:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: ZragTenant
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: absent
+        wait: false
+      loop: "{{ zragtenants_all.resources | default([]) }}"
+      ignore_errors: true
+
+    - name: Get all ZAssistantDeploy CRs
+      kubernetes.core.k8s_info:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: ZAssistantDeploy
+      register: zad_all
+      ignore_errors: true
+
+    - name: Force delete all ZAssistantDeploy CRs
+      kubernetes.core.k8s:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: ZAssistantDeploy
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: patched
+        definition:
+          metadata:
+            finalizers: []
+      loop: "{{ zad_all.resources | default([]) }}"
+      ignore_errors: true
+
+    - name: Delete all ZAssistantDeploy CRs
+      kubernetes.core.k8s:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: ZAssistantDeploy
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: absent
+        wait: false
+      loop: "{{ zad_all.resources | default([]) }}"
+      ignore_errors: true
+
+    - name: Get all AIOpsIntegration CRs
+      kubernetes.core.k8s_info:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AIOpsIntegration
+      register: aiops_all
+      ignore_errors: true
+
+    - name: Force delete all AIOpsIntegration CRs
+      kubernetes.core.k8s:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AIOpsIntegration
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: patched
+        definition:
+          metadata:
+            finalizers: []
+      loop: "{{ aiops_all.resources | default([]) }}"
+      ignore_errors: true
+
+    - name: Delete all AIOpsIntegration CRs
+      kubernetes.core.k8s:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AIOpsIntegration
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: absent
+        wait: false
+      loop: "{{ aiops_all.resources | default([]) }}"
+      ignore_errors: true
+
+    - name: Get all IngestionCredentials CRs
+      kubernetes.core.k8s_info:
+        api_version: ingestion.wxa4z.ibm.com/v1
+        kind: IngestionCredentials
+      register: ingestion_creds_all
+      ignore_errors: true
+
+    - name: Force delete all IngestionCredentials CRs
+      kubernetes.core.k8s:
+        api_version: ingestion.wxa4z.ibm.com/v1
+        kind: IngestionCredentials
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: patched
+        definition:
+          metadata:
+            finalizers: []
+      loop: "{{ ingestion_creds_all.resources | default([]) }}"
+      ignore_errors: true
+
+    - name: Delete all IngestionCredentials CRs
+      kubernetes.core.k8s:
+        api_version: ingestion.wxa4z.ibm.com/v1
+        kind: IngestionCredentials
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: absent
+        wait: false
+      loop: "{{ ingestion_creds_all.resources | default([]) }}"
+      ignore_errors: true
+
+    - name: Get all AgentService CRs
+      kubernetes.core.k8s_info:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AgentService
+      register: agent_services_all
+      ignore_errors: true
+
+    - name: Force delete all AgentService CRs
+      kubernetes.core.k8s:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AgentService
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: patched
+        definition:
+          metadata:
+            finalizers: []
+      loop: "{{ agent_services_all.resources | default([]) }}"
+      ignore_errors: true
+
+    - name: Delete all AgentService CRs
+      kubernetes.core.k8s:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AgentService
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: absent
+        wait: false
+      loop: "{{ agent_services_all.resources | default([]) }}"
+      ignore_errors: true
+
+    - name: Get all AgentSubscription CRs
+      kubernetes.core.k8s_info:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AgentSubscription
+      register: agent_subs_all
+      ignore_errors: true
+
+    - name: Force delete all AgentSubscription CRs
+      kubernetes.core.k8s:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AgentSubscription
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: patched
+        definition:
+          metadata:
+            finalizers: []
+      loop: "{{ agent_subs_all.resources | default([]) }}"
+      ignore_errors: true
+
+    - name: Delete all AgentSubscription CRs
+      kubernetes.core.k8s:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AgentSubscription
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: absent
+        wait: false
+      loop: "{{ agent_subs_all.resources | default([]) }}"
+      ignore_errors: true
+
+    # ========================================================================
+    # Step 3-5: Discover and Nuke All wxa4z Namespaces
+    # ========================================================================
+    - name: "Step 3-5/7: Discover and Clean All wxa4z Namespaces"
+      debug:
+        msg: "Discovering tenant namespaces and cleaning all wxa4z namespaces..."
+
+    - name: Get all namespaces starting with wxa4z-
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+      register: all_namespaces
+
+    - name: Filter wxa4z namespaces
+      set_fact:
+        wxa4z_namespaces: "{{ all_namespaces.resources | selectattr('metadata.name', 'match', '^wxa4z-.*') | map(attribute='metadata.name') | list }}"
+        wxa4z_tenant_namespaces: "{{ all_namespaces.resources | selectattr('metadata.name', 'match', '^wxa4z-[0-9]+$') | map(attribute='metadata.name') | list }}"
+
+    - name: Display discovered wxa4z namespaces
+      debug:
+        msg: "Found {{ wxa4z_namespaces | length }} wxa4z namespace(s): {{ wxa4z_namespaces }}"
+
+    - name: Display discovered tenant namespaces
+      debug:
+        msg: "Found {{ wxa4z_tenant_namespaces | length }} tenant namespace(s): {{ wxa4z_tenant_namespaces }}"
+
+    # ========================================================================
+    # Step 3a: Strip CR Finalizers Inside Tenant Namespaces
+    # Tenant namespaces (wxa4z-<numeric-id>) hold AgentService CRs whose
+    # finalizer blocks namespace deletion once the operator is gone.
+    # ========================================================================
+    - name: Get AgentService CRs in each tenant namespace
+      kubernetes.core.k8s_info:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AgentService
+        namespace: "{{ item }}"
+      register: tenant_agent_services
+      loop: "{{ wxa4z_tenant_namespaces }}"
+      ignore_errors: true
+
+    - name: Strip finalizers from AgentService CRs in tenant namespaces
+      kubernetes.core.k8s:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AgentService
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: patched
+        definition:
+          metadata:
+            finalizers: []
+      loop: "{{ tenant_agent_services.results | default([]) | map(attribute='resources') | flatten }}"
+      loop_control:
+        label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+      when: item.metadata.finalizers | default([]) | length > 0
+      ignore_errors: true
+
+    - name: No AgentService finalizers to remove in tenant namespaces
+      debug:
+        msg: "No AgentService CRs with finalizers found in tenant namespaces — nothing to strip."
+      when: >-
+        wxa4z_tenant_namespaces | length == 0 or
+        (tenant_agent_services.results | default([]) | map(attribute='resources') | flatten
+          | selectattr('metadata.finalizers', 'defined')
+          | selectattr('metadata.finalizers', 'ne', [])
+          | list | length == 0)
+
+    - name: Get AgentSubscription CRs in each tenant namespace
+      kubernetes.core.k8s_info:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AgentSubscription
+        namespace: "{{ item }}"
+      register: tenant_agent_subscriptions
+      loop: "{{ wxa4z_tenant_namespaces }}"
+      ignore_errors: true
+
+    - name: Strip finalizers from AgentSubscription CRs in tenant namespaces
+      kubernetes.core.k8s:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AgentSubscription
+        namespace: "{{ item.metadata.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: patched
+        definition:
+          metadata:
+            finalizers: []
+      loop: "{{ tenant_agent_subscriptions.results | default([]) | map(attribute='resources') | flatten }}"
+      loop_control:
+        label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+      when: item.metadata.finalizers | default([]) | length > 0
+      ignore_errors: true
+
+    - name: No AgentSubscription finalizers to remove in tenant namespaces
+      debug:
+        msg: "No AgentSubscription CRs with finalizers found in tenant namespaces — nothing to strip."
+      when: >-
+        wxa4z_tenant_namespaces | length == 0 or
+        (tenant_agent_subscriptions.results | default([]) | map(attribute='resources') | flatten
+          | selectattr('metadata.finalizers', 'defined')
+          | selectattr('metadata.finalizers', 'ne', [])
+          | list | length == 0)
+
+    # ========================================================================
+    # Step 6: Clean Cluster-Scoped Resources (RBAC + CRDs)
+    # ========================================================================
+    - name: "Step 6/7: Clean Cluster-Scoped Resources"
+      debug:
+        msg: "Cleaning cluster-scoped RBAC and CRDs..."
+
+    - name: Get all ClusterRoles
+      kubernetes.core.k8s_info:
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+      register: all_cluster_roles
+
+    - name: Filter wxa4z ClusterRoles
+      set_fact:
+        wxa4z_cluster_roles: "{{ all_cluster_roles.resources | selectattr('metadata.name', 'match', '.*(wxa4z|ibm-wxa4z|zrag-mt-bootstrapper).*') | map(attribute='metadata.name') | list }}"
+
+    - name: Delete wxa4z ClusterRoles
+      kubernetes.core.k8s:
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        name: "{{ item }}"
+        state: absent
+        wait: false
+      loop: "{{ wxa4z_cluster_roles }}"
+      ignore_errors: true
+
+    - name: Get all ClusterRoleBindings
+      kubernetes.core.k8s_info:
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+      register: all_cluster_role_bindings
+
+    - name: Filter wxa4z ClusterRoleBindings
+      set_fact:
+        wxa4z_cluster_role_bindings: "{{ all_cluster_role_bindings.resources | selectattr('metadata.name', 'match', '.*(wxa4z|ibm-wxa4z|zrag-mt-bootstrapper).*') | map(attribute='metadata.name') | list }}"
+
+    - name: Delete wxa4z ClusterRoleBindings
+      kubernetes.core.k8s:
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        name: "{{ item }}"
+        state: absent
+        wait: false
+      loop: "{{ wxa4z_cluster_role_bindings }}"
+      ignore_errors: true
+
+    - name: Strip finalizers from wxa4z CRDs
+      kubernetes.core.k8s:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: "{{ item }}"
+        state: patched
+        definition:
+          metadata:
+            finalizers: []
+      loop:
+        - zassistantdeploys.wxa4z.watsonx.ibm.com
+        - zragtenants.wxa4z.watsonx.ibm.com
+        - aiopsintegrations.wxa4z.watsonx.ibm.com
+        - agentservices.wxa4z.watsonx.ibm.com
+        - agentsubscriptions.wxa4z.watsonx.ibm.com
+        - ingestioncredentials.ingestion.wxa4z.ibm.com
+      ignore_errors: true
+
+    - name: Delete wxa4z CRDs
+      kubernetes.core.k8s:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: "{{ item }}"
+        state: absent
+        wait: false
+      loop:
+        - zassistantdeploys.wxa4z.watsonx.ibm.com
+        - zragtenants.wxa4z.watsonx.ibm.com
+        - aiopsintegrations.wxa4z.watsonx.ibm.com
+        - agentservices.wxa4z.watsonx.ibm.com
+        - agentsubscriptions.wxa4z.watsonx.ibm.com
+        - ingestioncredentials.ingestion.wxa4z.ibm.com
+      ignore_errors: true
+
+    # ========================================================================
+    # Step 7: Delete All wxa4z Namespaces
+    # Three-phase approach to avoid orphaned child resources in etcd:
+    #   7a. Explicitly delete all Secrets in each namespace first so the
+    #       namespace-lifecycle-controller has nothing left to garbage-collect.
+    #   7b. Issue namespace deletion and poll up to 120 s for natural GC.
+    #   7c. /finalize stripping as a fallback ONLY for namespaces still stuck
+    #       in Terminating after the polling timeout.
+    # ========================================================================
+    - name: "Step 7/7: Delete All wxa4z Namespaces"
+      debug:
+        msg: "Deleting all wxa4z namespaces (3-phase: secrets → delete+wait → finalize fallback)..."
+
+    # -------------------------------------------------------------------------
+    # 7a: Explicitly delete all Secrets in every wxa4z-* namespace BEFORE
+    #     issuing the namespace deletion.  This prevents tenant-os-credentials,
+    #     TLS secrets, IFM/watsonx credentials and similar objects from being
+    #     left orphaned in etcd once the Namespace object is removed.
+    # -------------------------------------------------------------------------
+    - name: "7a: Delete all Secrets in each wxa4z namespace"
+      shell: >
+        kubectl delete secrets --all -n {{ item }}
+        --ignore-not-found=true
+      loop: "{{ wxa4z_namespaces }}"
+      register: delete_ns_secrets
+      failed_when:
+        - delete_ns_secrets.rc is defined
+        - delete_ns_secrets.rc != 0
+        - '"not found" not in (delete_ns_secrets.stderr | default(""))'
+      changed_when: delete_ns_secrets.rc is defined and delete_ns_secrets.rc == 0
+      ignore_errors: true
+
+    # -------------------------------------------------------------------------
+    # 7b: Delete namespaces and allow the namespace-lifecycle-controller to do
+    #     normal garbage collection.  Poll every 10 s for up to 120 s
+    #     (12 retries × 10 s delay) before considering a namespace "stuck".
+    # -------------------------------------------------------------------------
+    - name: "7b: Delete all wxa4z namespaces"
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ item }}"
+        state: absent
+        wait: false
+      loop: "{{ wxa4z_namespaces }}"
+      ignore_errors: true
+
+    - name: "7b: Poll namespace deletion (up to 120 s for natural GC)"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: "{{ item }}"
+      register: ns_poll
+      loop: "{{ wxa4z_namespaces }}"
+      until: ns_poll.resources | length == 0
+      retries: 12
+      delay: 10
+      ignore_errors: true
+
+    # -------------------------------------------------------------------------
+    # 7c: Fallback — strip /finalize ONLY for namespaces genuinely stuck in
+    #     Terminating after the 120 s polling window.
+    # -------------------------------------------------------------------------
+    - name: "7c: Identify namespaces still stuck in Terminating"
+      set_fact:
+        wxa4z_stuck_namespaces: >-
+          {{ ns_poll.results
+             | selectattr('resources', 'defined')
+             | selectattr('resources', 'ne', [])
+             | selectattr('resources', 'defined')
+             | map(attribute='resources')
+             | flatten
+             | selectattr('status.phase', 'defined')
+             | selectattr('status.phase', 'equalto', 'Terminating')
+             | map(attribute='metadata.name')
+             | list }}
+
+    - name: "7c: Report stuck namespaces (if any)"
+      debug:
+        msg: >-
+          {{ wxa4z_stuck_namespaces | length }} namespace(s) still Terminating after 120 s —
+          will force-strip finalizers: {{ wxa4z_stuck_namespaces }}
+      when: wxa4z_stuck_namespaces | length > 0
+
+    - name: "7c: No stuck namespaces — /finalize fallback not needed"
+      debug:
+        msg: "All wxa4z namespaces deleted cleanly within the 120 s window."
+      when: wxa4z_stuck_namespaces | length == 0
+
+    - name: "7c: Strip finalizers from stuck namespaces (/finalize fallback)"
+      shell: |
+        kubectl get namespace {{ item }} -o json | \
+        jq '.spec.finalizers = [] | .metadata.finalizers = []' | \
+        kubectl replace --raw /api/v1/namespaces/{{ item }}/finalize -f -
+      loop: "{{ wxa4z_stuck_namespaces }}"
+      register: strip_ns_finalizers
+      when: wxa4z_stuck_namespaces | length > 0
+      failed_when:
+        - strip_ns_finalizers.rc is defined
+        - strip_ns_finalizers.rc != 0
+        - '"not found" not in (strip_ns_finalizers.stderr | default(""))'
+      changed_when: strip_ns_finalizers.rc is defined and strip_ns_finalizers.rc == 0
+      ignore_errors: true
+
+    - name: "7c: Finalizer strip summary"
+      debug:
+        msg: >-
+          {{
+            'Stripped namespace finalizers from: ' +
+            (strip_ns_finalizers.results | default([])
+              | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0)
+              | map(attribute='item') | list | join(', '))
+            if (strip_ns_finalizers.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0) | list | length > 0)
+            else 'No namespace-level finalizers needed stripping.'
+          }}
+      when: wxa4z_stuck_namespaces | length > 0
+
+    - name: "7c: Confirm all wxa4z namespaces are fully gone"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: "{{ item }}"
+      register: ns_gone
+      loop: "{{ wxa4z_namespaces }}"
+      until: ns_gone.resources | length == 0
+      retries: 6
+      delay: 10
+      ignore_errors: true
+
+    - name: Display remaining wxa4z namespaces (if any)
+      debug:
+        msg: "Remaining wxa4z namespaces: {{ ns_gone.results | selectattr('resources', 'defined') | selectattr('resources', 'ne', []) | map(attribute='item') | list }}"
+
+  rescue:
+    - name: Uninstall completed with warnings
+      debug:
+        msg: "Complete uninstall encountered issues. Manual inspection may be required."
+
+  always:
+    - name: Complete uninstall finished
+      debug:
+        msg: "wxa4z v3.3 complete uninstall flow completed."

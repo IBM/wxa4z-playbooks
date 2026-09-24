@@ -1,0 +1,10 @@
+non_olm:
+  watsonxOrchestrate:
+    installMode: "agentic"
+    uab:
+      enabled: false
+    size: small
+    watsonxAI:
+      watsonxaiifm: false
+      #syomModels: [ibm-granite-8b-unified-api-model-v2] # List of SYOM models 
+      ootbModels: "granite-3-3-8b-instruct"

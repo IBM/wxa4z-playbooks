@@ -1,0 +1,456 @@
+---
+# Configure Model Gateway Role
+# This role runs CLI commands to configure the model gateway
+#
+# Tags:
+#   - ifm: Configure Model Gateway for IFM (IBM Foundation Models) inferencing stack
+#   - aio: Configure Model Gateway for AIO (AI Optimizer) inferencing stack
+#   - rhaiis: Configure Model Gateway for RHAIIS (Red Hat AI Inference Server)
+#   - uninstall: Remove Model Gateway configuration
+#
+# Prerequisites:
+#   - User must be logged into OpenShift cluster (oc login)
+#   - orchestrate CLI must be installed (see installation check below)
+
+# =============================================================================
+# VARIABLE VALIDATION
+# =============================================================================
+
+- name: Validate required variables for configure-model-gateway aio path
+  tags:
+    - aio
+  ansible.builtin.assert:
+    that:
+      - aio_cluster_ip is defined and aio_cluster_ip | length > 0
+      - aio_api_key is defined and aio_api_key | length > 0
+    fail_msg: |
+      The following variables are required by the configure-model-gateway role for the aio path but are missing or invalid.
+      Please configure them in vars/global.yaml:
+
+        aio_cluster_ip             - AI Optimizer endpoint hostname or IP
+                                     Current: {{ aio_cluster_ip | default('NOT SET') }}
+        aio_api_key                - AI Optimizer API key
+                                     Current: {{ aio_api_key | default('NOT SET') }}
+    success_msg: "configure-model-gateway aio variable validation passed"
+
+- name: Validate required variables for configure-model-gateway ifm path
+  tags:
+    - ifm
+  ansible.builtin.assert:
+    that:
+      - cpd_api_key is defined and cpd_api_key | length > 0
+      - watsonx_url is defined and watsonx_url | length > 0
+      - watsonx_api_key is defined and watsonx_api_key | length > 0
+      - watsonx_model_id is defined and watsonx_model_id | length > 0
+      - watsonx_space_id is defined and watsonx_space_id | length > 0
+    fail_msg: |
+      The following variables are required by the configure-model-gateway role for the ifm path but are missing or invalid.
+      Please configure them in vars/global.yaml:
+
+        cpd_api_key                - CPD API key for IFM configuration
+                                     Current: {{ cpd_api_key | default('NOT SET') }}
+        watsonx_url                - WatsonX endpoint URL
+                                     Current: {{ watsonx_url | default('NOT SET') }}
+        watsonx_api_key            - WatsonX API key
+                                     Current: {{ watsonx_api_key | default('NOT SET') }}
+        watsonx_model_id           - WatsonX model identifier
+                                     Current: {{ watsonx_model_id | default('NOT SET') }}
+        watsonx_space_id           - WatsonX deployment space ID
+                                     Current: {{ watsonx_space_id | default('NOT SET') }}
+    success_msg: "configure-model-gateway ifm variable validation passed"
+
+- name: Validate required variables for configure-model-gateway rhaiis path
+  tags:
+    - rhaiis
+  ansible.builtin.assert:
+    that:
+      - rhaiis_inferencing_endpoint is defined and rhaiis_inferencing_endpoint | length > 0
+      - rhaiis_api_key is defined and rhaiis_api_key | length > 0
+    fail_msg: |
+      The following variables are required by the configure-model-gateway role for the rhaiis path but are missing or invalid.
+      Please configure them in vars/global.yaml:
+
+        rhaiis_inferencing_endpoint - RHAIIS inferencing endpoint URL
+                                      Current: {{ rhaiis_inferencing_endpoint | default('NOT SET') }}
+        rhaiis_api_key              - RHAIIS API key
+                                      Current: {{ rhaiis_api_key | default('NOT SET') }}
+    success_msg: "configure-model-gateway rhaiis variable validation passed"
+
+# =============================================================================
+# TAG VALIDATION
+# =============================================================================
+
+- name: Check if valid tag is specified for model-gateway role
+  ansible.builtin.fail:
+    msg: |
+      ============================================================
+      ERROR: Invalid tag for model-gateway role!
+      
+      This role requires one of the following tags:
+        - ifm: Configure Model Gateway for IFM (IBM Foundation Models)
+        - aio: Configure Model Gateway for AIO (AI Optimizer)
+        - rhaiis: Configure Model Gateway for RHAIIS (Red Hat AI Inference Server)
+        - uninstall: Remove Model Gateway configuration
+      
+      You provided: {{ ansible_run_tags | join(', ') }}
+      
+      Usage examples:
+        ansible-playbook install-wxa4z.yml --tags ifm
+        ansible-playbook install-wxa4z.yml --tags aio
+        ansible-playbook install-wxa4z.yml --tags rhaiis
+        ansible-playbook install-wxa4z.yml --tags uninstall
+      
+      Please specify a valid tag and try again.
+      ============================================================
+  when:
+    - "'ifm' not in ansible_run_tags"
+    - "'aio' not in ansible_run_tags"
+    - "'rhaiis' not in ansible_run_tags"
+    - "'uninstall' not in ansible_run_tags"
+  tags:
+    - always
+
+# =============================================================================
+# COMMON STEPS - ORCHESTRATE CLI CHECK
+# Reference: https://www.ibm.com/docs/en/watsonx/waz/3.2.0?topic=gateway-configure-environment-in-adk
+# =============================================================================
+
+- name: Check if orchestrate CLI is installed
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.command: which orchestrate
+  register: orchestrate_check
+  failed_when: false
+  changed_when: false
+
+- name: Display orchestrate CLI installation instructions
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  when: orchestrate_check.rc != 0
+  ansible.builtin.fail:
+    msg: |
+      ============================================================
+      orchestrate CLI is not installed or not in PATH.
+      
+      Please install the orchestrate CLI by following the instructions at:
+      https://developer.watson-orchestrate.ibm.com/getting_started/installing
+      
+      ============================================================
+
+# =============================================================================
+# COMMON STEPS - GET CPD CREDENTIALS
+# Extract CPD admin credentials from the secret in cpd-instance-1 namespace
+# These credentials are ALWAYS retrieved from the secret, never from vars file
+# =============================================================================
+
+- name: Get CPD admin credentials from secret
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: ibm-iam-bindinfo-platform-auth-idp-credentials
+    namespace: "{{ cpd_instance_ns }}"
+  register: cpd_secret
+  when: admin_password is not defined
+
+- name: Extract CPD admin password
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  ansible.builtin.set_fact:
+    cpd_password: "{{ admin_password if admin_password is defined else (cpd_secret.resources[0].data.admin_password | b64decode) }}"
+
+
+# =============================================================================
+# COMMON STEPS - GET SERVICE INSTANCE URL AND API KEY FROM SECRETS
+# Check for wxo-tenant-id and cpd-api-key secrets first, fall back to vars
+# Service instance URL format: https://<cpd_url>/orchestrate/cpd-instance-1/instances/<tenant_id>
+# =============================================================================
+
+- name: Get CPD Route for service instance URL construction
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Route
+    name: cpd
+    namespace: "{{ cpd_instance_ns }}"
+  register: cpd_route_for_url
+  when: cpd_url is not defined
+
+- name: Set CPD URL for service instance URL construction
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  ansible.builtin.set_fact:
+    cpd_host_url: "{{ 'https://' + cpd_url if cpd_url is defined else 'https://' + cpd_route_for_url.resources[0].spec.host }}"
+
+
+- name: Extract environment name from CPD route
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  ansible.builtin.set_fact:
+    environment_name: "{{ (cpd_url if cpd_url is defined else cpd_route_for_url.resources[0].spec.host) | regex_search('\\.apps\\.([^.]+)\\.', '\\1') | first }}"
+
+- name: Construct connection name from environment name
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  ansible.builtin.set_fact:
+    connection_name: "{{ environment_name }}-mgw-credentials"
+
+- name: Display auto-generated names
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  ansible.builtin.debug:
+    msg: |
+      Auto-generated configuration:
+      - Environment Name: {{ environment_name }}
+      - Connection Name: {{ connection_name }}
+      - CPD URL: {{ cpd_host_url }}
+
+- name: Check if wxo-tenant-ids ConfigMap exists
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    name: wxo-tenant-ids
+    namespace: "{{ cpd_instance_ns }}"
+  register: wxo_tenant_configmap
+  when: wxo_tenant_ids is not defined
+  failed_when: false
+
+- name: Check if cpd-api-key secret exists
+  tags:
+    - ifm
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: cpd-api-key
+    namespace: "{{ cpd_instance_ns }}"
+  register: cpd_api_key_secret
+  when: api_key is not defined
+  failed_when: false
+
+- name: Get tenant ID from available sources
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  vars:
+    cm_resources: "{{ wxo_tenant_configmap.resources | default([]) }}"
+    cm_data: "{{ cm_resources[0].data if (cm_resources | length > 0 and cm_resources[0].data is defined and cm_resources[0].data) else {} }}"
+  ansible.builtin.set_fact:
+    wxo_tenant_id: >-
+      {{
+        wxo_tenant_ids[wxo_instances[0].name] if (wxo_tenant_ids is defined and wxo_instances is defined and wxo_instances | length > 0)
+        else (cm_data[wxo_instances[0].name] if (cm_data and wxo_instances is defined and wxo_instances | length > 0 and wxo_instances[0].name in cm_data)
+        else (cm_data.values() | list | first if (cm_data and cm_data | length > 0)
+        else ''))
+      }}
+  when: wxo_tenant_id is not defined or wxo_tenant_id == ''
+
+- name: Convert instance name to tenant ID if needed
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  vars:
+    cm_data: "{{ wxo_tenant_configmap.resources | default([]) | map(attribute='data') | select | list | first | default({}) }}"
+  ansible.builtin.set_fact:
+    wxo_tenant_id: "{{ cm_data[wxo_tenant_id] }}"
+    tenant_id_source: "Converted from instance name ({{ wxo_tenant_id }}) via ConfigMap"
+  when:
+    - wxo_tenant_id is defined
+    - wxo_tenant_id != ''
+    - (cm_data | default({})) | length > 0
+    - wxo_tenant_id in (cm_data | default({})).keys()
+
+- name: Determine tenant ID source for display
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.set_fact:
+    tenant_id_source: >-
+      {{
+        'Direct variable (wxo_tenant_id)' if (wxo_tenant_id is defined and wxo_tenant_id != '' and (wxo_tenant_ids is not defined or wxo_instances is not defined))
+        else ('Dictionary lookup (wxo_tenant_ids)' if (wxo_tenant_ids is defined and wxo_instances is defined and wxo_instances | length > 0)
+        else ('ConfigMap with instance name (' + wxo_instances[0].name + ')' if (wxo_tenant_configmap.resources is defined and wxo_tenant_configmap.resources | length > 0 and wxo_instances is defined and wxo_instances | length > 0)
+        else ('ConfigMap (first available tenant)' if (wxo_tenant_configmap.resources is defined and wxo_tenant_configmap.resources | length > 0)
+        else 'Unknown')))
+      }}
+  when: wxo_tenant_id is defined and wxo_tenant_id != ''
+
+- name: Display tenant ID and source
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.debug:
+    msg: |
+      ============================================================
+      WxO Tenant ID Configuration:
+      
+      Tenant ID: {{ wxo_tenant_id }}
+      Source: {{ tenant_id_source }}
+      
+      {% if wxo_instances is defined and wxo_instances | length > 0 %}
+      Instance Name: {{ wxo_instances[0].name }}
+      {% endif %}
+      ============================================================
+  when: wxo_tenant_id is defined and wxo_tenant_id != ''
+
+- name: Fail if no tenant ID is available
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.fail:
+    msg: |
+      ============================================================
+      ERROR: No WxO tenant ID found!
+      
+      Please provide a tenant ID using one of these methods:
+        1. Set wxo_tenant_id variable in vars/global.yaml
+        2. Define wxo_tenant_ids dictionary in vars/global.yaml
+        3. Ensure wxo-tenant-ids ConfigMap exists in {{ cpd_instance_ns }}
+      
+      Example in vars/global.yaml:
+        wxo_tenant_id: "your-tenant-id-here"
+      
+      Or:
+        wxo_tenant_ids:
+          instance-name: "tenant-id-here"
+      ============================================================
+  when: wxo_tenant_id is not defined or wxo_tenant_id == ''
+
+- name: Construct service_instance_url
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.set_fact:
+    service_instance_url: "{{ cpd_host_url }}/orchestrate/{{ cpd_instance_ns }}/instances/{{ wxo_tenant_id }}"
+  when: wxo_tenant_id is defined
+
+- name: Set cpd_api_key from available sources (IFM only)
+  tags:
+    - ifm
+  ansible.builtin.set_fact:
+    cpd_api_key: >-
+      {{
+        api_key if api_key is defined
+        else (cpd_api_key_secret.resources[0].data['cpd-api-key'] | b64decode if (cpd_api_key_secret.resources is defined and cpd_api_key_secret.resources | length > 0)
+        else cpd_api_key)
+      }}
+
+- name: Display constructed service_instance_url
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.debug:
+    msg: |
+      Service Instance URL: {{ service_instance_url }}
+      Source: {{ 'Constructed from wxo-tenant-id secret' if (wxo_tenant_secret.resources is defined and wxo_tenant_secret.resources | length > 0) else 'vars/global.yaml' }}
+
+- name: Display source of cpd_api_key (IFM only)
+  tags:
+    - ifm
+  ansible.builtin.debug:
+    msg: "Using cpd_api_key from {{ 'cpd-api-key secret' if (cpd_api_key_secret.resources is defined and cpd_api_key_secret.resources | length > 0) else 'vars/global.yaml' }}"
+
+# =============================================================================
+# COMMON STEPS - CONFIGURE ENVIRONMENT IN ADK
+# These steps run for both IFM and AIO configurations
+# Reference: https://www.ibm.com/docs/en/watsonx/waz/3.2.0?topic=gateway-configure-environment-in-adk
+#
+# Uses:
+#   - environment_name: from vars/global.yaml
+#   - service_instance_url: from wxo-tenant-id secret or vars/global.yaml
+#   - cpd_username: extracted from secret above
+#   - cpd_password: extracted from secret above
+# =============================================================================
+
+- name: Common configuration - Add and Activate WXO Environment
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  block:
+
+    - name: Add WXO environment (with auto-confirmation for updates)
+      ansible.builtin.shell: >
+        echo "y" | orchestrate env add
+        -n {{ environment_name }}
+        -u {{ service_instance_url }}
+        --type cpd
+        --insecure
+      register: env_add_result
+      changed_when: "'added' in env_add_result.stdout or 'updated' in env_add_result.stdout or env_add_result.rc == 0"
+      failed_when: false
+      
+    - name: Display environment add status
+      ansible.builtin.debug:
+        var: env_add_result.stdout
+      
+    - name: Activate WXO environment
+      ansible.builtin.command: >
+        orchestrate env activate
+        --username=cpadmin
+        --password={{ cpd_password }}
+        {{ environment_name }}
+      register: env_activate_result
+      changed_when: env_activate_result.rc == 0
+
+    - name: Display environment activation status
+      ansible.builtin.debug:
+        var: env_activate_result.stdout
+
+# =============================================================================
+# TAG-SPECIFIC CONFIGURATION
+# Each tag delegates to its own task file
+# =============================================================================
+
+- name: Configure Model Gateway for IFM (watsonx Foundation Models)
+  tags: ifm
+  ansible.builtin.import_tasks: ifm.yaml
+
+- name: Configure Model Gateway for AIO (AI Optimizer)
+  tags: aio
+  ansible.builtin.import_tasks: aio.yaml
+
+- name: Configure Model Gateway for RHAIIS (Red Hat AI Inference Server)
+  tags: rhaiis
+  ansible.builtin.import_tasks: rhaiis.yaml
+
+- name: Uninstall Model Gateway Configuration
+  tags: uninstall
+  ansible.builtin.import_tasks: uninstall.yaml

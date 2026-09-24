@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: wxa4z-zos-topology-secrets
+  namespace: wxa4z-zad
+type: Opaque
+stringData:
+  ZOSMF_USERNAME: "{{ zosmf_username | default('') }}"
+  ZOSMF_PASSWORD: "{{ zosmf_password | default('') }}"
+  OMEGAMON_TOKEN: "{{ omegamon_token | default('') }}"
+  REDIS_PASSWORD: "{{ redis_password | default('') }}"

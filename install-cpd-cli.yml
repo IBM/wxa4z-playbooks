@@ -1,0 +1,159 @@
+# Usage notes:
+# - Run this playbook with: ansible-playbook install-cpd-cli.yml
+# - The cpd-cli version is determined by cpd_version in vars/global.yaml
+# - Or override with: ansible-playbook install-cpd-cli.yml -e cpd_cli_url=https://.../cpd-cli.tar.gz
+
+---
+- name: Install IBM cpd-cli (macOS / Linux)
+  hosts: localhost
+  gather_facts: true
+  
+  vars_files:
+    # Choose the appropriate vars file for your architecture:
+    - vars/global.yaml
+
+  vars:
+    # CPD CLI version and release tag mapping based on CPD version
+    cpd_cli_mapping:
+      "5.3.0":
+        version: "14.3.0"
+        release_tag: "v14.3.0_refresh_2"
+      "5.3.1":
+        version: "14.3.1"
+        release_tag: "v14.3.1.5"
+    
+    # Determine cpd-cli version and release tag from cpd_version
+    cpd_cli_info: "{{ cpd_cli_mapping[cpd_version] | default(cpd_cli_mapping['5.3.1']) }}"
+    cpd_cli_version: "{{ cpd_cli_info.version }}"
+    cpd_cli_release_tag: "{{ cpd_cli_info.release_tag }}"
+    
+    user_home_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}"
+    cpd_dir: "{{ user_home_dir }}/bin/cpd"
+
+  tasks:
+    - name: Display CPD version being used
+      ansible.builtin.debug:
+        msg: "Installing cpd-cli version {{ cpd_cli_version }} ({{ cpd_cli_release_tag }}) for CPD {{ cpd_version }}"
+
+    - name: Set cpd_cli_url for macOS Intel (Darwin x86_64)
+      ansible.builtin.set_fact:
+        cpd_cli_url: "https://github.com/IBM/cpd-cli/releases/download/{{ cpd_cli_release_tag }}/cpd-cli-darwin-EE-{{ cpd_cli_version }}.tgz"
+      when: cpd_cli_url is not defined and ansible_system == 'Darwin' and ansible_architecture == 'x86_64'
+
+    - name: Set cpd_cli_url for macOS Apple Silicon (Darwin arm64)
+      ansible.builtin.set_fact:
+        cpd_cli_url: "https://github.com/IBM/cpd-cli/releases/download/{{ cpd_cli_release_tag }}/cpd-cli-arm64-EE-{{ cpd_cli_version }}.tgz"
+      when: cpd_cli_url is not defined and ansible_system == 'Darwin' and ansible_architecture == 'arm64'
+
+    - name: Set cpd_cli_url for Linux x86_64
+      ansible.builtin.set_fact:
+        cpd_cli_url: "https://github.com/IBM/cpd-cli/releases/download/{{ cpd_cli_release_tag }}/cpd-cli-linux-EE-{{ cpd_cli_version }}.tgz"
+      when: cpd_cli_url is not defined and ansible_system == 'Linux' and ansible_architecture == 'x86_64'
+
+    - name: Set cpd_cli_url for Linux s390x
+      ansible.builtin.set_fact:
+        cpd_cli_url: "https://github.com/IBM/cpd-cli/releases/download/{{ cpd_cli_release_tag }}/cpd-cli-s390x-EE-{{ cpd_cli_version }}.tgz"
+      when: cpd_cli_url is not defined and ansible_system == 'Linux' and ansible_architecture == 's390x'
+
+    - name: Determine shell profile
+      ansible.builtin.set_fact:
+        shell_profile: "{{ '~/.zshrc' if ansible_system == 'Darwin' else '~/.bashrc' }}"
+
+    - name: Display cpd_cli_url being used
+      ansible.builtin.debug:
+        msg: "Using cpd_cli_url: {{ cpd_cli_url }}"
+
+    - name: Create temporary working directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: cpdcli
+      register: tmpdir
+
+    - name: Set local variables
+      ansible.builtin.set_fact:
+        workdir: "{{ tmpdir.path }}"
+        filename: "{{ cpd_cli_url.split('/')[-1] }}"
+
+    - name: "Download cpd-cli package to tmpdir {{ workdir }}"
+      ansible.builtin.get_url:
+        url: "{{ cpd_cli_url }}"
+        dest: "{{ workdir }}/{{ filename }}"
+        mode: '0644'
+      register: downloaded
+
+    - name: Create cpd-cli installation directory {{ cpd_dir }}
+      ansible.builtin.file:
+        path: "{{ cpd_dir }}"
+        state: directory
+        mode: '0755'
+        recurse: true
+
+    - name: Get the name of the root directory in the tarball
+      ansible.builtin.shell: "tar -tf {{ workdir }}/{{ filename }} | head -1 | cut -f1 -d'/'"
+      register: extracted_cpd_cli_dir
+      changed_when: false
+
+    - name: Use the folder name in a subsequent task
+      ansible.builtin.debug:
+        msg: "The cpd-cli folder is {{ extracted_cpd_cli_dir.stdout }}"
+
+    - name: Extract cpd-cli archive to cpd_dir {{ cpd_dir }}
+      ansible.builtin.command: "tar -xzf {{ workdir }}/{{ filename }} -C {{ cpd_dir }}"
+      args:
+        creates: "{{ cpd_dir }}/{{ extracted_cpd_cli_dir.stdout }}"
+
+    - name: Remove existing 'current' directory if it exists
+      ansible.builtin.file:
+        path: "{{ cpd_dir }}/current"
+        state: absent
+      when: extracted_cpd_cli_dir.stdout != 'current'
+
+    - name: Rename the extracted directory to a consistent name
+      ansible.builtin.command: "mv {{ cpd_dir }}/{{ extracted_cpd_cli_dir.stdout }} {{ cpd_dir }}/current"
+      when: extracted_cpd_cli_dir.stdout != 'current'
+
+    - name: Ensure the line is in the profile
+      ansible.builtin.lineinfile:
+        path: "{{ shell_profile }}"
+        line: 'export PATH="{{ cpd_dir }}/current:$PATH"'
+        create: true
+        state: present
+      register: profile_updated
+
+    - name: Verify cpd-cli installation
+      ansible.builtin.command: "{{ cpd_dir }}/current/cpd-cli version"
+      register: version_out
+      changed_when: false
+      failed_when: false
+
+    - name: Display installation summary
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          cpd-cli Installation Complete
+          ============================================================
+          CPD Version: {{ cpd_version }}
+          cpd-cli Version: {{ cpd_cli_version }}
+          Installation directory: {{ cpd_dir }}/current
+          Downloaded from: {{ cpd_cli_url }}
+          
+          Verification: {{ version_out.stdout_lines[0] | default('Unable to verify') }}
+          
+          To use cpd-cli:
+          1. Restart your terminal (PATH updated in {{ shell_profile }})
+          2. Or run: source {{ shell_profile }}
+          3. Or use full path: {{ cpd_dir }}/current/cpd-cli
+          ============================================================
+
+    - name: Clean up temporary directory
+      ansible.builtin.file:
+        path: "{{ workdir }}"
+        state: absent
+      when: workdir is defined
+
+
+# Troubleshooting:
+# If you encounter SSL certificate verification errors on macOS (e.g., "CERTIFICATE_VERIFY_FAILED"),
+# run the Python certificate installer to update the system's SSL certificates:
+#   /Applications/Python*/Install\ Certificates.command
+# This updates the certifi package and creates the necessary certificate symlinks for Python's SSL module.

@@ -1,0 +1,13 @@
+apiVersion: prereq.isf.ibm.com/v1
+kind: SpectrumFusion
+metadata:
+  name: spectrumfusion
+  namespace: "{{ fdf_namespace }}"
+spec:
+  GlobalDataPlatform:
+    Enable: false
+  configuration:
+    services:
+      skipOnBoardingServices: false
+  license:
+    accept: true

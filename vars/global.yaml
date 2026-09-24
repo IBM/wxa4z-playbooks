@@ -1,0 +1,280 @@
+---
+# ============================================================================
+# Global Variables for IBM Cloud Pak / OpenShift Deployment
+# ============================================================================
+# This file contains variables that are shared across multiple roles.
+# Role-specific variables should remain in their respective defaults/main.yml
+#
+# Variables are ordered to match the role execution sequence.
+# See Documentation/QUICKSTART.md for the full installation order.
+#
+# Usage: Include this file in your playbooks with:
+#   vars_files:
+#     - vars/global.yaml
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# OpenShift Cluster Connection (prereq — all roles)
+# ----------------------------------------------------------------------------
+
+# Set perform_ocp_login: true to enable automatic login in playbooks
+perform_ocp_login: true
+
+# OpenShift API Server URL
+# Navigate to OCP UI → top-right user menu → Copy login command → Display Token
+# Copy the --server value and paste it here
+ocp_server: ""
+
+# OpenShift Admin Username
+ocp_username: "kubeadmin"
+
+# OpenShift Admin Password
+ocp_password: ""
+
+# ----------------------------------------------------------------------------
+# IBM Entitlement Key (prereq — pull-secret role)
+# ----------------------------------------------------------------------------
+
+# IBM ICR Entitlement Key for pulling images
+# Get your key from: https://myibm.ibm.com/products-services/containerlibrary
+entitlement_key: ""
+
+# ----------------------------------------------------------------------------
+# CPD / Software Hub — shared across software-hub, install-wxo, and cpd-cli roles
+# ----------------------------------------------------------------------------
+
+# CPD release version — supported: 5.3.1
+cpd_version: "5.3.1"
+
+# Local path where cpd-cli stores its workspace (created automatically)
+path_cpd_cli_workspace: ""
+
+# OLM Utils image — used by software-hub and CPD installation roles
+olm_utils_image: "icr.io/cpopen/cpd/olm-utils-v4:{{ cpd_version }}"
+
+# ----------------------------------------------------------------------------
+# OpenShift Namespaces — shared across multiple roles
+# ----------------------------------------------------------------------------
+
+# Operators namespace (where Software Hub operators are installed)
+cpd_operators_ns: "cpd-operators"
+
+# Instance namespace (where operands/instances are deployed)
+cpd_instance_ns: "cpd-instance-1"
+
+# Scheduler namespace — x86_64 only
+cpd_scheduler_ns: "ibm-cpd-scheduler"
+
+# Set skip_scheduler: true to skip the CPD scheduler installation.
+# Use this when deploying on x86_64 but inferencing against IBM Cloud
+# watsonx.ai IFM Services instead of an on-premises GPU cluster.
+# Scheduler steps only run when BOTH conditions are met:
+#   - ansible_architecture == "x86_64"
+#   - skip_scheduler == false  (default)
+skip_scheduler: false
+
+# Licensing namespace
+licensing_ns: "ibm-licensing"
+
+# ----------------------------------------------------------------------------
+# fusion-data-foundation role
+# Storage nodes — one entry per worker node that has an FDF disk attached
+# ----------------------------------------------------------------------------
+
+# [s390x] Use CCW device paths: /dev/disk/by-path/ccw-0.0.XXXX
+# [x86_64] Use PCI device paths: /dev/disk/by-path/pci-0000:00:XX.0
+# See QUICKSTART.md §4 / §5 for how to discover the correct path per node
+ocp_storage_nodes:
+  - name: worker0-node-name
+    path: /dev/disk/by-path/<path>
+  - name: worker1-node-name
+    path: /dev/disk/by-path/<path>
+  - name: worker2-node-name
+    path: /dev/disk/by-path/<path>
+
+# ----------------------------------------------------------------------------
+# node-feature-discovery / nvidia-gpu-operator / rhoai-operator roles
+# [x86_64 only] — set to true only if NVIDIA GPUs are available on the cluster
+# ----------------------------------------------------------------------------
+
+nvidia_gpu_enabled: false
+
+# ----------------------------------------------------------------------------
+# software-hub role
+# ----------------------------------------------------------------------------
+
+# Block storage class (persistent volumes)
+software_hub_block_storage_class: "ocs-storagecluster-ceph-rbd"
+
+# File storage class (shared/RWX storage)
+software_hub_file_storage_class: "ocs-storagecluster-cephfs"
+
+# Image registry prefix (icr.io for online installs)
+software_hub_image_pull_prefix: "icr.io"
+
+# Image pull secret name created in the operator namespace
+software_hub_image_pull_secret: "image-pull-secret"
+
+# Docker/ICR username for pulling images
+software_hub_docker_username: "cp"
+
+# License type to accept (EE = Enterprise Edition)
+software_hub_license_types: "EE"
+
+# NooBaa (MCG) secrets
+software_hub_noobaa_account_secret: "noobaa-admin"
+software_hub_noobaa_cert_secret: "noobaa-s3-serving-cert"
+
+# Components that require MCG/NooBaa setup
+software_hub_mcg_components:
+  - watson_assistant
+  - watsonx_orchestrate
+
+# Directory for saving cluster-scoped resource manifests
+software_hub_outputs_dir: "{{ playbook_dir }}/outputs"
+
+# ----------------------------------------------------------------------------
+# install-wxo role
+# ----------------------------------------------------------------------------
+
+# Inferencing stack
+# Options: 'aio' (s390x / AI Optimizer LPAR), 'ifm' (x86_64 / WatsonX AI IFM), 'rhaiis' (RHAIIS endpoint)
+wxo_inferencing_stack: "aio"
+
+# Only relevant when wxo_inferencing_stack == 'ifm'
+# true  = same-cluster inferencing (watsonxaiifm: true in install-options)
+# false = external IFM endpoint    (watsonxaiifm: false in install-options)
+wxo_internal_ifm: false
+
+# Deployment size — 'small', 'medium', or 'large'
+wxo_size: "small"
+
+# Install mode — 'agentic' or 'conversational'
+wxo_install_mode: "agentic"
+
+# ----------------------------------------------------------------------------
+# create-wxo-instance role
+# ----------------------------------------------------------------------------
+
+# WxO instances to create — configure names and descriptions as needed
+wxo_instances:
+  - name: "wo-prod"
+    description: "Production instance"
+  - name: "wo-dev"
+    description: "Development instance"
+
+# ----------------------------------------------------------------------------
+# wxa4z-v3.3 role
+# ----------------------------------------------------------------------------
+
+# wxa4z catalog source image
+catalog_source_image: "icr.io/cpopen/ibm-wxa4z-catalog:v3.3.2"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Inferencing / LLM Credentials
+# ═══════════════════════════════════════════════════════════════════════════
+# Configure credentials based on your inferencing stack.
+# Only fill in the section that matches your deployment.
+#
+# Roles using these credentials:
+#   - wxa4z-v3.3 (zAssistant deployment)
+#   - configure-model-gateway (WxO model gateway configuration)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# --- MANDATORY: Always Required ---
+model_runtime: ""        # MUST pick one: openai_protocol, on-prem, cloud
+watsonx_model_id: ""     # Example: ibm/granite-4.1-8b or meta-llama/llama-3-3-70b-instruct
+cpd_username: "cpadmin"  # CPD admin username (default: cpadmin)
+
+# --- AIO (AI Optimizer) — s390x only ---
+# Required when model_runtime: openai_protocol (for AIO deployments)
+# Used by: wxa4z-v3.3 role (constructs llm_base_url), configure-model-gateway role
+aio_cluster_ip: ""  # IP or hostname (no ports/paths). Example: 192.168.1.100
+aio_api_key: ""     # API key from AIO LPAR
+
+# --- RHAIIS (Red Hat AI Inference Server) — x86_64 or s390x ---
+# Required when model_runtime: openai_protocol (for RHAIIS deployments)
+# Used by: wxa4z-v3.3 role (sets llm_base_url), configure-model-gateway role
+rhaiis_inferencing_endpoint: ""  # Full endpoint URL (no /v1 suffix needed)
+rhaiis_api_key: ""               # RHAIIS API key
+
+# --- IFM (Integrated Foundation Model / WatsonX AI) — x86_64 ---
+# Required when model_runtime: on-prem or cloud
+# Used by: wxa4z-v3.3 role, configure-model-gateway role
+watsonx_url: ""         # Software Hub (on-prem) or SaaS wxai (cloud) URL
+watsonx_api_key: ""     # Software Hub (on-prem) or IAM (cloud) API key
+watsonx_space_id: ""    # REQUIRED for on-prem/cloud. Deployment space ID
+watsonx_project_id: ""  # Project ID (optional)
+
+# --- Optional: All Stacks ---
+wxo_tenant_id: ""  # Leave empty to auto-fetch from cluster; set explicitly to skip lookup
+
+# ═══════════════════════════════════════════════════════════════════════════
+# OpenSearch Credentials
+# ═══════════════════════════════════════════════════════════════════════════
+# Default credentials for OpenSearch database and wrapper service
+# Change these for production deployments
+# ═══════════════════════════════════════════════════════════════════════════
+opensearch_username: ""
+opensearch_client_password: ""
+opensearch_wrapper_username: ""
+opensearch_wrapper_password: ""
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Authorization Service Secrets
+# ═══════════════════════════════════════════════════════════════════════════
+# Security tokens for the authorization service and agent authentication
+# Change these for production deployments
+# ═══════════════════════════════════════════════════════════════════════════
+sts_secret: ""
+p12_password: ""
+jwt_signing_key: ""
+platform_agent_secret: ""
+cics_agent_token: ""
+db2_agent_token: ""
+ims_agent_token: ""
+intellimagic_agent_token: ""
+omegamon_agent_token: ""
+support_agent_token: ""
+upgrade_agent_token: ""
+zowe_enabled: "false"
+
+# Authorization CA Certificate (base64 encoded p12 file)
+# Leave empty unless you have a custom certificate
+wxa4z_authorization_ca_cert: ""
+
+# ═══════════════════════════════════════════════════════════════════════════
+# z/OS Topology Service Credentials (Optional)
+# ═══════════════════════════════════════════════════════════════════════════
+# Only required if integrating with z/OS systems
+# Leave empty if not using z/OS topology features
+# ═══════════════════════════════════════════════════════════════════════════
+zosmf_username: ""
+zosmf_password: ""
+omegamon_token: ""
+redis_password: ""
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AIOps Integration Credentials (Optional)
+# ═══════════════════════════════════════════════════════════════════════════
+# Required for AIOps integration with SMU and ZWS
+# Leave empty if not using AIOps features
+# ═══════════════════════════════════════════════════════════════════════════
+
+# SMU (System Management Unit) Credentials
+smu_hostname: ""
+smu_port: 16311
+smu_username: ""
+smu_password: ""
+smu_admin_username: ""
+smu_admin_password: ""
+
+# ZWS (z/OS Web Services) Credentials
+zws_hostname: ""
+zws_port: 22443
+zws_username: ""
+zws_password: ""
+
+# AIOps Integration Credentials
+aiops_username: ""
+aiops_password: ""

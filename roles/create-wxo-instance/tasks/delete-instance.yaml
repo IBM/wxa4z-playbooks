@@ -1,0 +1,23 @@
+---
+# Delete a single WxO instance
+
+- name: "Check if instance '{{ wxo_instance.name }}' exists"
+  ansible.builtin.set_fact:
+    existing_instance: "{{ existing_wxo_instances | selectattr('display_name', 'equalto', wxo_instance.name) | list | first | default(none) }}"
+
+- name: "Delete WxO instance '{{ wxo_instance.name }}'"
+  ansible.builtin.command: >
+    curl -L -X DELETE 'https://{{ cpd_url }}/zen-data/v3/service_instances/{{ existing_instance.id }}' \
+    --insecure \
+    -H 'Accept: application/json' \
+    -H 'Authorization: Bearer {{ auth_token }}'
+  register: instance_deletion
+  when: existing_instance is not none
+  no_log: true
+
+- name: "Display status for '{{ wxo_instance.name }}'"
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Deleted' if existing_instance is not none else 'Not found, skipping' }}
+      WxO instance '{{ wxo_instance.name }}'
+      {{ ('with ID: ' ~ existing_instance.id) if existing_instance is not none else '' }}

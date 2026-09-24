@@ -1,0 +1,179 @@
+---
+# Ansible playbook scaffold for installing/configuring wxa4z
+- name: Install and configure wxa4z
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    # Global variables shared across all roles
+    - vars/global.yaml
+
+  environment:
+    CPD_CLI_MANAGE_WORKSPACE: "{{ path_cpd_cli_workspace }}"
+    OLM_UTILS_IMAGE: "icr.io/cpopen/cpd/olm-utils-v4:{{ cpd_version }}"
+
+  pre_tasks:
+    - name: Validate CPD version
+      ansible.builtin.assert:
+        that:
+          - cpd_version is defined
+          - cpd_version in ['5.3.1']
+        fail_msg: |
+          Invalid CPD version: {{ cpd_version | default('undefined') }}
+          Supported versions: 5.3.1
+          Please set cpd_version in vars/global.yaml to one of the supported versions.
+        success_msg: "CPD version {{ cpd_version }} is valid"
+      tags:
+        - always
+
+    - name: Ensure at least one tag is specified
+      ansible.builtin.fail:
+        msg: "Error: You must provide at least one tag (e.g., --tags install). Running without tags is disabled."
+      when:
+        - ansible_run_tags | length == 1
+        - "'all' in ansible_run_tags"
+      tags:
+        - always
+
+    - name: Validate OpenShift login variables
+      ansible.builtin.assert:
+        that:
+          - ocp_server is defined and ocp_server | length > 0
+          - ocp_username is defined and ocp_username | length > 0
+          - ocp_password is defined and ocp_password | length > 0
+        fail_msg: |
+          The following variables are required when perform_ocp_login is enabled.
+          Please configure them in vars/global.yaml:
+
+            ocp_server   - OpenShift API server URL
+                           Current: {{ ocp_server | default('NOT SET') }}
+
+            ocp_username - OpenShift admin username
+                           Current: {{ ocp_username | default('NOT SET') }}
+
+            ocp_password - OpenShift admin password
+                           Current: {{ ocp_password | default('NOT SET') }}
+        success_msg: "OpenShift login variable validation passed"
+      when: perform_ocp_login | default(false) | bool
+      tags:
+        - always
+        - login
+
+    - name: Login to OpenShift cluster
+      ansible.builtin.command: >
+        oc login {{ ocp_server }}
+        --username={{ ocp_username }}
+        --password={{ ocp_password }}
+        --insecure-skip-tls-verify=true
+      changed_when: false
+      no_log: true
+      when: perform_ocp_login | default(false) | bool
+      tags:
+        - always
+        - login
+
+    - name: Login to OpenShift with cpd-cli
+      ansible.builtin.command: >
+        cpd-cli manage login-to-ocp
+        --server={{ ocp_server }}
+        --username={{ ocp_username }}
+        --password={{ ocp_password }}
+      changed_when: false
+      no_log: false
+      when: perform_ocp_login | default(false) | bool
+      tags:
+        - always
+        - login
+
+    - name: Verify OpenShift connection
+      kubernetes.core.k8s_cluster_info:
+      register: cluster_info
+      when: perform_ocp_login | default(false) | bool
+      tags:
+        - always
+        - login
+
+    - name: Display cluster information
+      ansible.builtin.debug:
+        msg: |
+          Connected to OpenShift cluster
+          Kubernetes version: {{ cluster_info.version.server.kubernetes.gitVersion }}
+          Server: {{ ocp_server }}
+      when:
+        - perform_ocp_login | default(false) | bool
+        - cluster_info is defined
+      tags:
+        - always
+        - login
+
+    - name: Detect cluster architecture from worker nodes
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+        label_selectors:
+          - node-role.kubernetes.io/worker=
+      register: worker_nodes
+      tags:
+        - always
+
+    - name: Set cluster architecture from first worker node
+      ansible.builtin.set_fact:
+        ansible_architecture: >-
+          {{
+            'x86_64' if worker_nodes.resources[0].status.nodeInfo.architecture == 'amd64'
+            else worker_nodes.resources[0].status.nodeInfo.architecture
+          }}
+      when:
+        - worker_nodes.resources | length > 0
+        - worker_nodes.resources[0].status.nodeInfo.architecture is defined
+      tags:
+        - always
+
+    - name: Display detected architecture
+      ansible.builtin.debug:
+        msg: |
+          Detected Architecture: {{ ansible_architecture }}
+          Cluster has {{ worker_nodes.resources | length }} worker node(s)
+      tags:
+        - always
+
+  roles:
+    # -------------------------------------------------------------------------
+    # Prerequisite Tasks -- review the prerequisite section in the README.md.
+    # -------------------------------------------------------------------------    
+    # To run the pre-requisite playbooks, you can run these commands in your terminal:
+    # ansible-playbook install-cpd-cli.yml
+    # ansible-playbook install-orchestrate-adk.yml
+
+    # -------------------------------------------------------------------------
+    # s390x Installation Order
+    # ansible-playbook install-wxa4z.yml --tags <role>,install
+    # -------------------------------------------------------------------------
+    # - pull-secret                # tags: install
+    # - ibm-operator-catalog       # tags: install, uninstall
+    # - fusion-data-foundation     # tags: install
+    # - cert-manager-operator      # tags: install, uninstall
+    # - software-hub               # tags: install, uninstall
+    # - get-cpd-credentials        # tags: get-cpd-credentials
+    # - install-wxo                # tags: install
+    # - create-wxo-instance        # tags: install
+    # - configure-model-gateway    # tags: aio, ifm, rhaiis, uninstall
+    # - wxa4z-v3.3                 # tags: install (all), operator, zad, aiops, uninstall
+
+    # -------------------------------------------------------------------------
+    # x86_64 Installation Order
+    # ansible-playbook install-wxa4z.yml --tags <role>,install
+    # -------------------------------------------------------------------------
+    # - pull-secret                # tags: install
+    # - ibm-operator-catalog       # tags: install, uninstall
+    # - fusion-data-foundation     # tags: install
+    # - node-feature-discovery     # tags: install, uninstall
+    # - cert-manager-operator      # tags: install, uninstall
+    # - nvidia-gpu-operator        # tags: install, uninstall
+    # - rhoai-operator             # tags: install, uninstall
+    # - software-hub               # tags: install, uninstall
+    # - get-cpd-credentials        # tags: get-cpd-credentials
+    # - install-wxo                # tags: install
+    # - create-wxo-instance        # tags: install
+    # - configure-model-gateway    # tags: aio, ifm, rhaiis, uninstall
+    # - wxa4z-v3.3                 # tags: install (all), operator, zad, aiops, uninstall

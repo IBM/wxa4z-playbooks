@@ -1,0 +1,11 @@
+- name: Delete OCP Project for Software Hub Operands
+  kubernetes.core.k8s:
+    state: absent
+    definition: "{{ lookup('template', role_path + '/files/project-operands.yaml') | from_yaml }}"
+  ignore_errors: true
+
+- name: Delete OCP Project for Software Hub Operators
+  kubernetes.core.k8s:
+    state: absent
+    definition: "{{ lookup('template', role_path + '/files/project-operators.yaml') | from_yaml }}"
+  ignore_errors: true

@@ -1,0 +1,8 @@
+# Tasks in this file are from documentation provided here:
+# https://www.ibm.com/docs/en/software-hub/5.3.x?topic=hub-creating-cluster-scoped-resources
+
+- name: Delete cluster-scoped resources for Software Hub
+  kubernetes.core.k8s:
+    state: absent
+    src: "{{ software_hub_outputs_dir }}/{{ cpd_version }}-cluster_scoped_resources.yaml"
+  ignore_errors: true

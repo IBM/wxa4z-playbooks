@@ -1,0 +1,123 @@
+# This role follows the steps from the following documentation:
+# https://www.ibm.com/docs/en/watsonx/waz/3.1.0?topic=s390x-install-node-feature-discovery-operator-nfd
+
+---
+- name: Verify nvidia_gpu_enabled before proceeding
+  ansible.builtin.fail:
+    msg: |
+      ABORTED: nvidia_gpu_enabled is set to false in your vars file.
+      The NodeFeatureDiscovery role requires NVIDIA GPU support to be enabled.
+      To proceed, set nvidia_gpu_enabled: true in your global vars file and re-run.
+      Playbook execution has been halted — no resources have been applied to the cluster.
+  when: not (nvidia_gpu_enabled | default(false) | bool)
+  tags:
+    - always
+
+- name: Run node feature discovery installation steps
+  tags: install
+  block:
+    - name: Create openshift-nfd namespace
+      kubernetes.core.k8s:
+        state: present
+        src: files/project-nfd.yaml
+
+    - name: Create OperatorGroup for Node Feature Discovery Operator
+      kubernetes.core.k8s:
+        state: present
+        src: files/operator-group-nfd.yaml
+
+    - name: Create Subscription for Node Feature Discovery Operator
+      kubernetes.core.k8s:
+        state: present
+        src: files/subscription-nfd.yaml
+
+    - name: Wait for Node Feature Discovery Operator to be in Succeeded state
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: openshift-nfd
+      register: nfd_csv
+      until: nfd_csv.resources | length > 0 and nfd_csv.resources[0].status.phase == "Succeeded"
+      retries: 30
+      delay: 10
+
+    - name: Create NodeFeatureDiscovery Instance CR
+      kubernetes.core.k8s:
+        state: present
+        src: files/nfd-instance.yaml
+
+    - name: Wait for NodeFeatureDiscovery instance to be in Available state
+      kubernetes.core.k8s_info:
+        api_version: nfd.openshift.io/v1
+        kind: NodeFeatureDiscovery
+        namespace: openshift-nfd
+        name: nfd-instance
+      register: nfd_instance
+      until: >-
+        nfd_instance.resources | length > 0 and
+        nfd_instance.resources[0].status.conditions |
+        selectattr('type', 'equalto', 'Available') |
+        selectattr('status', 'equalto', 'True') |
+        list | length > 0
+      retries: 30
+      delay: 10
+
+    # PCI-10DE is the vendor/device ID for NVIDIA GPUs.
+    - name: Gather cluster Nodes
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+      register: nodes_info
+      retries: 12
+      delay: 10
+      until: nodes_info.resources | length > 0
+
+    - name: Build list of nodes with NVIDIA GPU label
+      ansible.builtin.set_fact:
+        nodes_pci_10de: >-
+          {{ nodes_info.resources
+             | selectattr('metadata.labels', 'defined')
+             | selectattr('metadata.labels', 'contains', 'feature.node.kubernetes.io/pci-10de.present')
+             | map(attribute='metadata.name')
+             | list }}
+
+    - name: Print nodes labelled with NVIDIA GPU (pci-10de.present)
+      ansible.builtin.debug:
+        msg: "NVIDIA GPU nodes (feature.node.kubernetes.io/pci-10de.present=true): {{ nodes_pci_10de }}"
+
+    - name: Warn if no node has the NVIDIA GPU label
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: No worker nodes found with label feature.node.kubernetes.io/pci-10de.present=true.
+          Verify that the GPU node is powered on and NFD has completed its scan.
+      when: nodes_pci_10de | length == 0
+
+
+- name: Run OpenShift Node Feature Discovery uninstallation steps
+  tags: uninstall
+  block:
+    - name: Delete Subscription for Node Feature Discovery Operator
+      kubernetes.core.k8s:
+        state: "absent"
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: nfd-operator-subscription
+        namespace: openshift-nfd
+      ignore_errors: true
+
+    - name: Delete OperatorGroup for Node Feature Discovery Operator
+      kubernetes.core.k8s:
+        state: "absent"
+        api_version: operators.coreos.com/v1alpha2
+        kind: OperatorGroup
+        name: openshift-nfd-og
+        namespace: openshift-nfd
+      ignore_errors: true
+
+    - name: Delete openshift-nfd namespace
+      kubernetes.core.k8s:
+        state: "absent"
+        api_version: v1
+        kind: Namespace
+        name: openshift-nfd
+      ignore_errors: true

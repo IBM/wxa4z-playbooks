@@ -1,0 +1,65 @@
+---
+- name: Validate required variables for pull-secret role
+  tags: install
+  ansible.builtin.assert:
+    that:
+      - entitlement_key is defined and entitlement_key | length > 0
+    fail_msg: |
+      The following variables are required by the pull-secret role but are missing or invalid.
+      Please configure them in vars/global.yaml:
+
+        entitlement_key - IBM ICR Entitlement Key for pulling images from cp.icr.io
+                          Current: {{ entitlement_key | default('NOT SET') }}
+    success_msg: "pull-secret variable validation passed"
+
+- name: Add IBM Entitlement Key to OpenShift global Pull Secret
+  tags: install
+  block:
+    - name: Get current global pull secret
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: pull-secret
+        namespace: openshift-config
+      register: pull_secret
+      no_log: true
+
+    - name: Decode existing dockerconfigjson
+      ansible.builtin.set_fact:
+        current_dockerconfig: >-
+          {{
+            pull_secret.resources[0].data['.dockerconfigjson']
+            | b64decode
+            | from_json
+          }}
+      no_log: true
+
+    - name: Build updated dockerconfigjson with new registry
+      ansible.builtin.set_fact:
+        updated_dockerconfig: >-
+          {{
+            current_dockerconfig
+            | combine({
+                "auths":
+                  current_dockerconfig.auths
+                  | combine({
+                      "cp.icr.io": {
+                        "auth": ("cp:" ~ entitlement_key) | b64encode
+                      }
+                    })
+              }, recursive=True)
+          }}
+
+    - name: Update global pull secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: pull-secret
+            namespace: openshift-config
+          type: kubernetes.io/dockerconfigjson
+          data:
+            .dockerconfigjson: "{{ updated_dockerconfig | to_json | b64encode }}"
+      no_log: true

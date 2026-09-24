@@ -1,0 +1,83 @@
+---
+# Playbook: install-orchestrate-adk.yml
+#
+# Installs the IBM watsonx Orchestrate ADK (Agent Development Kit) system-wide.
+# Follows: https://developer.watson-orchestrate.ibm.com/getting_started/installing#linux
+#
+# Prerequisites:
+#   - Python 3.11+ and pip available in PATH
+#
+# Usage:
+#   Local:  ansible-playbook install-orchestrate-adk.yml
+#   s390x:  ansible-playbook install-orchestrate-adk.yml -e "ansible_python_interpreter=/usr/bin/python3.12"
+
+- name: Install IBM watsonx Orchestrate ADK
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    # Resolved interpreter: honours the -e override on s390x, falls back to
+    # the system python3 for local installations where no override is passed.
+    _python_bin: "{{ ansible_python_interpreter | default('python3') }}"
+
+  tasks:
+
+    # ------------------------------------------------------------------
+    # 1. Validate Python version (docs require 3.11+)
+    # ------------------------------------------------------------------
+    - name: Check Python version
+      ansible.builtin.command: "{{ _python_bin }} --version"
+      register: python_version_out
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if Python 3 is not found
+      ansible.builtin.fail:
+        msg: >
+          Python 3 was not found at '{{ _python_bin }}'.
+          Local install: ensure python3 is in PATH (sudo apt-get install -y python3 python3-pip).
+          s390x install: pass the correct interpreter path, e.g.
+            ansible-playbook install-orchestrate-adk.yml -e "ansible_python_interpreter=/usr/bin/python3.12"
+      when: python_version_out.rc != 0
+
+    - name: Parse Python version numbers
+      ansible.builtin.set_fact:
+        python_major: "{{ python_version_out.stdout.split()[1].split('.')[0] | int }}"
+        python_minor: "{{ python_version_out.stdout.split()[1].split('.')[1] | int }}"
+
+    - name: Fail if Python version is too old
+      ansible.builtin.fail:
+        msg: >
+          Python {{ python_version_out.stdout.split()[1] }} is too old.
+          The Orchestrate ADK requires Python 3.11+.
+          Local install: sudo apt-get install -y python3 python3-pip
+          s390x install: sudo dnf install -y python3.12 python3.12-pip, then re-run with
+            -e "ansible_python_interpreter=/usr/bin/python3.12"
+      when: python_major | int < 3 or (python_major | int == 3 and python_minor | int < 11)
+
+    - name: Display detected Python version
+      ansible.builtin.debug:
+        msg: "Python {{ python_major }}.{{ python_minor }} detected — OK"
+
+    # ------------------------------------------------------------------
+    # 2. Install the ADK system-wide
+    #    pip install --upgrade ibm-watsonx-orchestrate
+    # ------------------------------------------------------------------
+    - name: Install ibm-watsonx-orchestrate system-wide
+      ansible.builtin.pip:
+        name: ibm-watsonx-orchestrate
+        state: latest
+        extra_args: "--upgrade"
+
+    # ------------------------------------------------------------------
+    # 3. Verify — confirm the orchestrate CLI is available
+    # ------------------------------------------------------------------
+    - name: Verify orchestrate CLI is available
+      ansible.builtin.command: orchestrate --version
+      register: adk_cli_version
+      changed_when: false
+
+    - name: Display installed ADK version
+      ansible.builtin.debug:
+        msg: "IBM watsonx Orchestrate ADK installed — {{ adk_cli_version.stdout }}"

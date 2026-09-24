@@ -1,0 +1,333 @@
+# This role follows the steps from this doc:
+# https://ibmdocs-test.dcs.ibm.com/docs/en/SSAM7OZ_3.1.0_test?topic=operator-install-fusion-data-foundation
+# https://www.ibm.com/docs/en/fusion-software/2.12.0?topic=fusion-installing-premises-linux-z-zcx
+
+---
+- name: Validate required variables for fusion-data-foundation role
+  tags: install
+  ansible.builtin.assert:
+    that:
+      - ocp_storage_nodes is defined
+      - ocp_storage_nodes | length > 0
+      - ocp_storage_nodes | selectattr('name', 'defined') | selectattr('name', 'truthy') | list | length == ocp_storage_nodes | length
+      - ocp_storage_nodes | selectattr('path', 'defined') | selectattr('path', 'truthy') | list | length == ocp_storage_nodes | length
+      - "'/dev/disk/by-path/<path>' not in (ocp_storage_nodes | map(attribute='path') | list)"
+    fail_msg: |
+      The following variables are required by the fusion-data-foundation role but are missing or invalid.
+      Please configure them in vars/global.yaml:
+
+        ocp_storage_nodes - List of worker nodes and attached FDF disk paths
+                            Each entry must include a non-empty name and path
+                            Replace placeholder paths like /dev/disk/by-path/<path>
+                            Current: {{ ocp_storage_nodes | default('NOT SET') }}
+    success_msg: "fusion-data-foundation variable validation passed"
+
+- name: Run installation steps for Fusion Data Foundation
+  tags: install
+  block:
+    - name: Label worker nodes for local storage
+      kubernetes.core.k8s:
+        state: patched
+        kind: Node
+        name: "{{ item.name }}"
+        definition:
+          metadata:
+            labels:
+              cluster.ocs.openshift.io/openshift-storage: ""
+      with_items: "{{ ocp_storage_nodes }}"
+
+    - name: Create ibm-spectrum-fusion-ns namespace
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/files/project-ibm-fusion.yaml') | from_yaml }}"
+
+    - name: Create FDF OperatorGroup
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/files/fdf-operator-group.yaml') | from_yaml }}"
+
+    - name: Create FDF Subscription
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/files/fdf-subscription.yaml') | from_yaml }}"
+
+    - name: Wait for FDF Subscription to have InstallPlan ready
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: "{{ fdf_subscription_name }}"
+        namespace: "{{ fdf_namespace }}"
+      register: fdf_subscription_info
+      until: >-
+        fdf_subscription_info.resources | length > 0 and
+        (fdf_subscription_info.resources[0].status is defined) and
+        (fdf_subscription_info.resources[0].status.installPlanRef is defined) and
+        (fdf_subscription_info.resources[0].status.installPlanRef.name | default('') != '')
+      retries: "{{ fdf_subscription_wait_retries }}"
+      delay: "{{ fdf_subscription_wait_delay }}"
+
+    - name: Approve FDF InstallPlan
+      kubernetes.core.k8s:
+        state: present
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        name: "{{ fdf_subscription_info.resources[0].status.installPlanRef.name }}"
+        namespace: "{{ fdf_namespace }}"
+        definition:
+          spec:
+            approved: true
+
+    - name: Wait for FDF ClusterServiceVersion to be in Succeeded state
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ fdf_namespace }}"
+      register: fdf_csv_info
+      until: >-
+        fdf_csv_info.resources | length > 0 and
+        (fdf_csv_info.resources[0].status | default({})).phase | default('') == "Succeeded"
+      retries: "{{ fdf_csv_wait_retries }}"
+      delay: "{{ fdf_csv_wait_delay }}"
+
+    - name: Create SpectrumFusion Operand CR
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/files/fusion-cr.yaml') | from_yaml }}"
+
+    - name: Wait for SpectrumFusion Operand CR
+      kubernetes.core.k8s_info:
+        api_version: prereq.isf.ibm.com/v1
+        kind: SpectrumFusion
+        namespace: "{{ fdf_namespace }}"
+      register: fdf_spectrum_fusion_info
+      until: >-
+        fdf_spectrum_fusion_info.resources | length > 0 and
+        (
+          (fdf_spectrum_fusion_info.resources[0].status | default({})).status
+          | default('')
+        ) == 'Completed'
+      retries: "{{ fdf_spectrum_fusion_wait_retries }}"
+      delay: "{{ fdf_spectrum_fusion_wait_delay }}"
+ 
+    - name: Create FusionServiceInstance CR
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/files/fusion-service-instance.yaml') | from_yaml }}"
+
+    - name: Wait for FusionServiceInstance CR to be in Ready state
+      kubernetes.core.k8s_info:
+        api_version: service.isf.ibm.com/v1
+        kind: FusionServiceInstance
+        name: "{{ fdf_service_instance_name }}"
+        namespace: "{{ fdf_namespace }}"
+      register: fusion_service_instance_info
+      until: >-
+        fusion_service_instance_info.resources | length > 0 and
+        (fusion_service_instance_info.resources[0].status is defined) and
+        ((fusion_service_instance_info.resources[0].status.installStatus | default({})).status | default('')) == 'Completed' and
+        not ((fusion_service_instance_info.resources[0].status.isInstallFailed | default(false)) | bool)
+      retries: "{{ fdf_service_instance_wait_retries }}"
+      delay: "{{ fdf_service_instance_wait_delay }}"
+    
+    - name: Create LocalVolumeSet
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/files/local-volume-set.yaml') | from_yaml }}"
+
+    - name: Wait for LocalVolumeSet to be in Ready state
+      kubernetes.core.k8s_info:
+        api_version: local.storage.openshift.io/v1alpha1
+        kind: LocalVolumeSet
+        name: "{{ fdf_storage_class }}"
+        namespace: "{{ fdf_local_storage_namespace }}"
+      register: localvolumeset_info
+      until: >-
+        localvolumeset_info.resources | length > 0 and
+        localvolumeset_info.resources[0].status.conditions[1].type == "Available"
+      retries: "{{ fdf_localvolume_wait_retries }}"
+      delay: "{{ fdf_localvolume_wait_delay }}"
+    
+    - name: Wait for StorageCluster CRD to be available
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: storageclusters.ocs.openshift.io
+      register: storagecluster_crd_info
+      until: >-
+        storagecluster_crd_info.resources | length > 0 and
+        (
+          storagecluster_crd_info.resources[0].status.conditions
+          | default([])
+          | selectattr('type', 'equalto', 'Established')
+          | selectattr('status', 'equalto', 'True')
+          | list
+          | length
+        ) > 0
+      retries: "{{ fdf_storagecluster_crd_wait_retries }}"
+      delay: "{{ fdf_storagecluster_crd_wait_delay }}"
+
+    - name: Create StorageCluster CR
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/files/storage-cluster.yaml') | from_yaml }}"
+
+    - name: Wait for StorageCluster CR to be in Ready state
+      kubernetes.core.k8s_info:
+        api_version: ocs.openshift.io/v1
+        kind: StorageCluster
+        name: "{{ fdf_storage_cluster_name }}"
+        namespace: "{{ fdf_storage_cluster_namespace }}"
+      register: storage_cluster_info
+      until: >-
+        storage_cluster_info.resources | length > 0 and
+        (storage_cluster_info.resources[0].status is defined) and
+        (storage_cluster_info.resources[0].status.phase == 'Ready')
+      retries: "{{ fdf_storagecluster_wait_retries }}"
+      delay: "{{ fdf_storagecluster_wait_delay }}"
+
+  rescue:
+    - name: Display FDF installation error
+      ansible.builtin.debug:
+        msg: |
+          Fusion Data Foundation installation failed.
+          Namespace: {{ fdf_namespace }}
+          Channel: {{ fdf_channel }}
+          Check the status of resources in {{ fdf_namespace }} namespace.
+
+    - name: Get Subscription status for debugging
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: "{{ fdf_subscription_name }}"
+        namespace: "{{ fdf_namespace }}"
+      register: fdf_subscription_debug
+      ignore_errors: true
+
+    - name: Get CSV status for debugging
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ fdf_namespace }}"
+      register: fdf_csv_debug
+      ignore_errors: true
+
+    - name: Get SpectrumFusion status for debugging
+      kubernetes.core.k8s_info:
+        api_version: prereq.isf.ibm.com/v1
+        kind: SpectrumFusion
+        namespace: "{{ fdf_namespace }}"
+      register: fdf_spectrum_debug
+      ignore_errors: true
+
+    - name: Get FusionServiceInstance status for debugging
+      kubernetes.core.k8s_info:
+        api_version: service.isf.ibm.com/v1
+        kind: FusionServiceInstance
+        name: "{{ fdf_service_instance_name }}"
+        namespace: "{{ fdf_namespace }}"
+      register: fdf_service_debug
+      ignore_errors: true
+
+    - name: Get StorageCluster status for debugging
+      kubernetes.core.k8s_info:
+        api_version: ocs.openshift.io/v1
+        kind: StorageCluster
+        name: "{{ fdf_storage_cluster_name }}"
+        namespace: "{{ fdf_storage_cluster_namespace }}"
+      register: fdf_storage_debug
+      ignore_errors: true
+
+    - name: Display resource statuses
+      ansible.builtin.debug:
+        msg:
+          - "Subscription status: {{ fdf_subscription_debug.resources | default([]) | map(attribute='status') | list }}"
+          - "CSV status: {{ fdf_csv_debug.resources | default([]) | map(attribute='status') | list }}"
+          - "SpectrumFusion status: {{ fdf_spectrum_debug.resources | default([]) | map(attribute='status') | list }}"
+          - "FusionServiceInstance status: {{ fdf_service_debug.resources | default([]) | map(attribute='status') | list }}"
+          - "StorageCluster status: {{ fdf_storage_debug.resources | default([]) | map(attribute='status') | list }}"
+
+    - name: Fail the playbook
+      ansible.builtin.fail:
+        msg: "Fusion Data Foundation installation failed. Check the logs above for details."
+
+- name: Run uninstall steps for Fusion Data Foundation
+  tags: uninstall
+  block:
+    # TODO - These steps need proper ordering so that the project doesn't have orphaned resources and gets stuck in 'Terminating' state.
+    - name: Delete ISFConsolePlugin CR
+      kubernetes.core.k8s:
+        state: absent
+        api_version: mgmtsft.isf.ibm.com/v1alpha1
+        kind: ISFConsolePlugin
+        name: isf-console
+        namespace: "{{ fdf_namespace }}"
+
+    - name: Delete FDF Application CR
+      kubernetes.core.k8s:
+        state: absent
+        api_version: application.isf.ibm.com/v1alpha1
+        kind: Application
+        name: "{{ fdf_namespace }}"
+        namespace: "{{ fdf_namespace }}"
+
+    - name: Delete Cluster CR
+      kubernetes.core.k8s:
+        state: absent
+        api_version: application.isf.ibm.com/v1
+        kind: Cluster
+        namespace: "{{ fdf_namespace }}"
+    # ENDTODO
+
+    - name: Delete FDF Subscription
+      kubernetes.core.k8s:
+        state: absent
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: "{{ fdf_subscription_name }}"
+        namespace: "{{ fdf_namespace }}"
+
+    - name: Delete FDF CSV
+      kubernetes.core.k8s:
+        state: absent
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ fdf_namespace }}"
+        label_selectors:
+          - "operators.coreos.com/{{ fdf_subscription_name }}.{{ fdf_namespace }}"
+
+    - name: Delete FDF OperatorGroup
+      kubernetes.core.k8s:
+        state: absent
+        api_version: operators.coreos.com/v1
+        kind: OperatorGroup
+        name: "{{ fdf_operator_group_name }}"
+        namespace: "{{ fdf_namespace }}"
+
+    - name: Delete ibm-spectrum-fusion-ns namespace
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Namespace
+        name: "{{ fdf_namespace }}"
+
+    - name: Wait for namespace deletion to complete
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: "{{ fdf_namespace }}"
+      register: namespace_info
+      until: namespace_info.resources | length == 0
+      retries: "{{ fdf_namespace_delete_wait_retries }}"
+      delay: "{{ fdf_namespace_delete_wait_delay }}"
+
+  rescue:
+    - name: Display FDF uninstallation error
+      ansible.builtin.debug:
+        msg: |
+          Fusion Data Foundation uninstallation failed.
+          Some resources may still exist in namespace: {{ fdf_namespace }}
+          Please check manually and clean up if needed.
+
+    - name: Fail the playbook
+      ansible.builtin.fail:
+        msg: "Fusion Data Foundation uninstallation failed. Check the logs above for details."

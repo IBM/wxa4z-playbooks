@@ -1,0 +1,180 @@
+---
+# RHOAI Operator installation tasks for x86_64 architecture
+# Ref: https://www.ibm.com/docs/en/watsonx/waz/3.3.0?topic=x86-install-operators-nvidia-gpus
+
+- name: Install RHOAI operator
+  tags: install
+  block:
+
+    - name: Create redhat-ods-operator namespace
+      kubernetes.core.k8s:
+        state: present
+        src: "files/namespace.yaml"
+
+    - name: Create operator group
+      kubernetes.core.k8s:
+        state: present
+        src: "files/x86_64/operator-group.yaml"
+
+    - name: Create subscription
+      kubernetes.core.k8s:
+        state: present
+        src: "files/x86_64/subscription.yaml"
+
+    - name: Wait for at least one RHOAI operator pod to be Running
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: redhat-ods-operator
+        label_selectors:
+          - "name=rhods-operator"
+      register: rhods_operator_pods
+      retries: 40
+      delay: 15
+      until: >
+        rhods_operator_pods.resources | selectattr('status.phase','equalto','Running') | list | length > 0
+    
+    - name: Wait for rhods-operator-service webhook endpoint to be ready
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Endpoints
+        name: rhods-operator-service
+        namespace: redhat-ods-operator
+      register: rhods_webhook_ep
+      retries: 20
+      delay: 15
+      until: >
+        rhods_webhook_ep.resources | length > 0 and
+        (rhods_webhook_ep.resources[0].subsets | default([]) | length > 0) and
+        (rhods_webhook_ep.resources[0].subsets[0].addresses | default([]) | length > 0)
+
+    - name: Apply default-dsci DSCInitialization
+      kubernetes.core.k8s:
+        state: present
+        src: "files/x86_64/default-dsci.yaml"
+
+    - name: Wait until default-dsci DSCInitialization is Ready
+      kubernetes.core.k8s_info:
+        api_version: dscinitialization.opendatahub.io/v1
+        kind: DSCInitialization
+        name: default-dsci
+      register: dsci_status
+      retries: 30
+      delay: 20
+      until: >
+        dsci_status.resources | length > 0 and
+        dsci_status.resources[0].status is defined and
+        dsci_status.resources[0].status.phase is defined and
+        dsci_status.resources[0].status.phase | lower == "ready"
+
+    - name: Apply the default DataScienceCluster
+      kubernetes.core.k8s:
+        state: present
+        src: "files/x86_64/default-dsc.yaml"
+
+    - name: Wait until DataScienceCluster default-dsc is Ready
+      kubernetes.core.k8s_info:
+        api_version: datasciencecluster.opendatahub.io/v1
+        kind: DataScienceCluster
+        name: default-dsc
+      register: dsc_status
+      retries: 30
+      delay: 20
+      until: >
+        dsc_status.resources | length > 0 and
+        dsc_status.resources[0].status.phase is defined and
+        dsc_status.resources[0].status.phase | lower == "ready"
+
+    - name: Show DataScienceCluster phase
+      ansible.builtin.debug:
+        msg: "default-dsc phase = {{ dsc_status.resources[0].status.phase }}"
+
+    - name: Wait until key RHOAI/KServe pods are Running in redhat-ods-applications
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: redhat-ods-applications
+        label_selectors:
+          - "app in (kserve-controller-manager, kubeflow-training-operator, odh-model-controller)"
+      register: ods_pods
+      retries: 40
+      delay: 30
+      until: >
+        ods_pods.resources | length > 0 and
+        (ods_pods.resources | map(attribute='status.phase') | list | select('equalto', 'Running') | list | length) == ods_pods.resources | length
+
+    # Patch inferenceservice-config ConfigMap:
+    #   1. Set opendatahub.io/managed: 'false' so the operator does not overwrite manual changes.
+    #   2. Set domainTemplate to "example.com" as required for x86 inference service routing.
+    - name: Disable operator management of inferenceservice-config ConfigMap
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: ConfigMap
+        name: inferenceservice-config
+        namespace: redhat-ods-applications
+        definition:
+          metadata:
+            annotations:
+              opendatahub.io/managed: 'false'
+        merge_type: merge
+
+    - name: Patch inferenceservice-config domainTemplate to example.com
+      kubernetes.core.k8s_json_patch:
+        api_version: v1
+        kind: ConfigMap
+        name: inferenceservice-config
+        namespace: redhat-ods-applications
+        patch:
+          - op: replace
+            path: /data/ingress
+            value: '{"domainTemplate": "example.com"}'
+
+- name: Uninstall RHOAI operator + resources
+  tags: uninstall
+  block:
+
+    - name: Delete default DataScienceCluster
+      kubernetes.core.k8s:
+        state: absent
+        src: "files/x86_64/default-dsc.yaml"
+
+    - name: Delete default-dsci DSCInitialization
+      kubernetes.core.k8s:
+        state: absent
+        src: "files/x86_64/default-dsci.yaml"
+
+    - name: Delete subscription
+      kubernetes.core.k8s:
+        state: absent
+        src: "files/x86_64/subscription.yaml"
+
+    - name: Delete operator group
+      kubernetes.core.k8s:
+        state: absent
+        src: "files/x86_64/operator-group.yaml"
+
+    - name: Delete redhat-ods-operator namespace
+      kubernetes.core.k8s:
+        state: absent
+        src: "files/namespace.yaml"
+
+    - name: Wait until all RHOAI operator pods are deleted
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: redhat-ods-operator
+        label_selectors:
+          - "name=rhods-operator"
+      register: rhods_operator_pods
+      retries: 40
+      delay: 15
+      until: rhods_operator_pods.resources | length == 0
+
+    - name: Wait until all pods in redhat-ods-applications are deleted
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: redhat-ods-applications
+      register: ods_pods
+      retries: 40
+      delay: 15
+      until: ods_pods.resources | length == 0

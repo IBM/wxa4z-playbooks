@@ -1,0 +1,38 @@
+# This role follows the steps from this doc:
+# https://ibmdocs-test.dcs.ibm.com/docs/en/SSAM7OZ_3.1.0_test?topic=operator-install-fusion-data-foundation
+# https://www.ibm.com/docs/en/fusion-software/2.12.0?topic=fusion-installing-premises-linux-z-zcx
+
+---
+- name: Run installation steps for Fusion Data Foundation
+  tags: install
+  block:
+    - name: Create ibm-operator-catalog CatalogSource
+      kubernetes.core.k8s:
+        state: present
+        src: files/catalog-source.yaml
+
+    - name: Wait for CatalogSource to be ready
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: CatalogSource
+        name: ibm-operator-catalog
+        namespace: openshift-marketplace
+      register: catalog_source_info
+      until: >-
+        catalog_source_info.resources | length > 0 and
+        (catalog_source_info.resources[0].status is defined) and
+        (catalog_source_info.resources[0].status.connectionState is defined) and
+        (catalog_source_info.resources[0].status.connectionState.lastObservedState == 'READY')
+      retries: 30
+      delay: 10
+
+- name: Run uninstall steps for Fusion Data Foundation
+  tags: uninstall
+  block:
+    - name: Delete ibm-operator-catalog CatalogSource
+      kubernetes.core.k8s:
+        state: absent
+        api_version: operators.coreos.com/v1alpha1
+        kind: CatalogSource
+        name: ibm-operator-catalog
+        namespace: openshift-marketplace

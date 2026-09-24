@@ -1,0 +1,165 @@
+---
+# =============================================================================
+# AIO-SPECIFIC CONFIGURATION
+# Reference: https://www.ibm.com/docs/en/watsonx/waz/3.2.0?topic=gateway-configure-ai-optimizer-model-connection
+# =============================================================================
+
+# -------------------------------------------------------------------------
+# Validation
+# -------------------------------------------------------------------------
+
+- name: Validate AIO required variables
+  ansible.builtin.fail:
+    msg: "AIO requires '{{ item.name }}' to be set (non-empty). Set it in vars/global.yaml."
+  when: item.value is not defined or item.value == ''
+  loop:
+    - { name: aio_cluster_ip, value: "{{ aio_cluster_ip | default('') }}" }
+    - { name: aio_api_key,    value: "{{ aio_api_key    | default('') }}" }
+
+# -------------------------------------------------------------------------
+# Step 1: Add Connection
+# -------------------------------------------------------------------------
+
+- name: Add AIO connection
+  ansible.builtin.command: >
+    orchestrate connections add
+    -a {{ connection_name }}
+  register: connection_add_result
+  changed_when: "'Creating connection' in connection_add_result.stdout and connection_add_result.rc == 0"
+  failed_when: connection_add_result.rc != 0 and 'already exists' not in connection_add_result.stdout
+
+# -------------------------------------------------------------------------
+# Step 2: Configure Connection (Draft and Live)
+# -------------------------------------------------------------------------
+
+- name: Configure AIO connection for draft environment
+  ansible.builtin.command: >
+    orchestrate connections configure
+    -a {{ connection_name }}
+    --kind=key_value
+    --env=draft
+    --type=team
+  register: connection_config_draft_result
+  changed_when: connection_config_draft_result.rc == 0 and 'Existing connection' not in connection_config_draft_result.stdout
+  failed_when: false
+
+- name: Configure AIO connection for live environment
+  ansible.builtin.command: >
+    orchestrate connections configure
+    -a {{ connection_name }}
+    --kind=key_value
+    --env=live
+    --type=team
+  register: connection_config_live_result
+  changed_when: connection_config_live_result.rc == 0 and 'Existing connection' not in connection_config_live_result.stdout
+  failed_when: false
+
+# -------------------------------------------------------------------------
+# Step 3: Set Credentials for Connection (Draft and Live)
+# NOTE: AIO only requires api_key
+# -------------------------------------------------------------------------
+
+- name: Set AIO credentials for draft environment
+  ansible.builtin.command: >
+    orchestrate connections set-credentials
+    -a {{ connection_name }}
+    --env draft
+    -e api_key={{ aio_api_key }}
+  register: credentials_draft_result
+  changed_when: credentials_draft_result.rc == 0
+  failed_when: false
+  no_log: true
+
+- name: Set AIO credentials for live environment
+  ansible.builtin.command: >
+    orchestrate connections set-credentials
+    -a {{ connection_name }}
+    --env live
+    -e api_key={{ aio_api_key }}
+  register: credentials_live_result
+  changed_when: credentials_live_result.rc == 0
+  failed_when: false
+  no_log: true
+
+# -------------------------------------------------------------------------
+# Step 4: Template and Import the Granite Model
+# Uses aio_cluster_ip from vars/global.yaml
+# -------------------------------------------------------------------------
+
+- name: Template granite-aio.yaml with AIO cluster IP
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/aio-granite-4.1-8b.yaml.j2"
+    dest: "/tmp/granite-aio-model.yaml"
+
+- name: Read templated file contents
+  ansible.builtin.slurp:
+    src: "/tmp/granite-aio-model.yaml"
+  register: templated_content
+
+- name: Display templated model file contents
+  ansible.builtin.debug:
+    msg: "{{ templated_content['content'] | b64decode }}"
+
+- name: Import granite model for AIO
+  ansible.builtin.command: >
+    orchestrate models import
+    --file /tmp/granite-aio-model.yaml
+    --app-id {{ connection_name }}
+  register: model_import_result
+  changed_when: >-
+    (model_import_result.rc == 0 or 'Successfully added' in model_import_result.stdout)
+    and 'Existing model' not in model_import_result.stdout
+  failed_when: >-
+    model_import_result.rc != 0
+    and 'Conflict' not in model_import_result.stderr
+    and 'default' not in model_import_result.stderr
+    and 'Successfully added' not in model_import_result.stdout
+  retries: 5
+  delay: 10
+  until: >-
+    model_import_result.rc == 0
+    or 'Conflict' in model_import_result.stderr
+    or 'default' in model_import_result.stderr
+    or 'Successfully added' in model_import_result.stdout
+
+- name: Clean up templated file
+  ansible.builtin.file:
+    path: "/tmp/granite-aio-model.yaml"
+    state: absent
+
+- name: Display AIO configuration completion
+  ansible.builtin.debug:
+    msg: |
+      {% if model_import_result.rc == 0 and 'Existing model' not in model_import_result.stdout %}
+      ============================================================
+      Model Gateway configuration for AIO completed successfully!
+      
+      Environment: {{ environment_name }}
+      Connection: {{ connection_name }}
+      Model: openai/ibm/granite-4.1-8b-instruct
+      AIO Endpoint: https://{{ aio_cluster_ip }}/api/com.ibm.aioinference/v1
+      Status: Model imported successfully
+      ============================================================
+      {% elif model_import_result.rc == 0 and 'Existing model' in model_import_result.stdout %}
+      ============================================================
+      Model Gateway configuration for AIO completed!
+      
+      Environment: {{ environment_name }}
+      Connection: {{ connection_name }}
+      Model: openai/ibm/granite-4.1-8b-instruct
+      AIO Endpoint: https://{{ aio_cluster_ip }}/api/com.ibm.aioinference/v1
+      Status: Model already exists and was updated
+      ============================================================
+      {% elif model_import_result.rc != 0 and 'Conflict' in model_import_result.stderr %}
+      ============================================================
+      Model import skipped (already exists as default LLM)
+      
+      No changes made to Model Gateway configuration.
+      The model is already configured and active.
+      
+      Environment: {{ environment_name }}
+      Connection: {{ connection_name }}
+      Model: openai/ibm/granite-4.1-8b-instruct
+      AIO Endpoint: https://{{ aio_cluster_ip }}/api/com.ibm.aioinference/v1
+      ============================================================
+      {% endif %}

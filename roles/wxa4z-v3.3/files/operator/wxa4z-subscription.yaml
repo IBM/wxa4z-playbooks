@@ -1,0 +1,11 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: ibm-wxa4z-subscription
+  namespace: wxa4z-operator
+spec:
+  channel: stable
+  installPlanApproval: Automatic
+  name: ibm-wxa4z-operator
+  source: ibm-wxa4z-operator-catalog
+  sourceNamespace: wxa4z-operator

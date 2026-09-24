@@ -1,0 +1,10 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: ibm-wxa4z-operator-catalog
+  namespace: wxa4z-operator
+spec:
+  displayName: "IBM watsonx Assistant for Z Operator Catalog"
+  image: "{{ catalog_source_image }}"
+  publisher: 'IBM'
+  sourceType: grpc

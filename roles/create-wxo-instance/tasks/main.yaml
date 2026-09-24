@@ -1,0 +1,245 @@
+# Reference: https://www.ibm.com/docs/en/software-hub/5.3.x?topic=pis-creating-service-instance-2
+
+- name: Validate required variables for create-wxo-instance role
+  tags: install
+  ansible.builtin.assert:
+    that:
+      - wxo_instances is defined
+      - wxo_instances | length > 0
+      - wxo_instances | selectattr('name', 'defined') | selectattr('name', 'truthy') | list | length == wxo_instances | length
+      - wxo_instances | selectattr('description', 'defined') | selectattr('description', 'truthy') | list | length == wxo_instances | length
+    fail_msg: |
+      The following variables are required by the create-wxo-instance role but are missing or invalid.
+      Please configure them in vars/global.yaml:
+
+        wxo_instances - List of Watsonx Orchestrate instances to create
+                        Each entry must include a non-empty name and description
+                        Current: {{ wxo_instances | default('NOT SET') }}
+    success_msg: "create-wxo-instance variable validation passed"
+
+- name: Run the steps to create WxO Instances
+  tags: install
+  block:
+
+    - name: Get CPD admin credentials from secret
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: ibm-iam-bindinfo-platform-auth-idp-credentials
+        namespace: "{{ cpd_instance_ns }}"
+      register: cpd_secret
+
+    - name: Get CPD Route
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Route
+        name: cpd
+        namespace: "{{ cpd_instance_ns }}"
+      register: cpd_route
+
+    - name: Set CPD URL
+      ansible.builtin.set_fact:
+        cpd_url: "{{ cpd_route.resources[0].spec.host }}"
+      
+    - name: Extract admin password
+      ansible.builtin.set_fact:
+        admin_password: "{{ cpd_secret.resources[0].data.admin_password | b64decode }}"
+
+    - name: Generate auth token
+      ansible.builtin.command: >
+        curl -L 'https://{{ cpd_url }}/icp4d-api/v1/authorize' \
+        -H 'cache-control: no-cache' \
+        -H 'Content-Type: application/json' \
+        --data '{"username":"cpadmin","password":"{{ admin_password }}"}' --insecure
+      register: auth_token_output
+      no_log: true
+
+    - name: Set auth token
+      ansible.builtin.set_fact:
+        auth_token: "{{ (auth_token_output.stdout | from_json).token }}"
+      no_log: true
+
+    - name: Check if API key secret already exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: cpd-api-key
+        namespace: "{{ cpd_instance_ns }}"
+      register: existing_api_key_secret
+
+    - name: Get existing API key from secret
+      ansible.builtin.set_fact:
+        api_key: "{{ existing_api_key_secret.resources[0].data['cpd-api-key'] | b64decode }}"
+      when: 
+        - existing_api_key_secret.resources | length > 0
+        - not (wxo_regenerate_api_key | bool)
+      no_log: true
+
+    - name: Generate new API Key
+      ansible.builtin.command: >
+        curl --location 'https://{{ cpd_url }}/usermgmt/v1/user/apiKey' \
+        --insecure \
+        -H 'Accept: application/json' \
+        -H 'Authorization: Bearer {{ auth_token }}'
+      register: api_key_details
+      when: 
+        - existing_api_key_secret.resources | length == 0 or (wxo_regenerate_api_key | bool)
+      no_log: true
+
+    - name: Extract API Key from generation response
+      ansible.builtin.set_fact:
+        api_key: "{{ (api_key_details.stdout | from_json).apiKey }}"
+      when: 
+        - existing_api_key_secret.resources | length == 0 or (wxo_regenerate_api_key | bool)
+      no_log: true
+
+    - name: Create OpenShift secret with CPD API key
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: cpd-api-key
+            namespace: "{{ cpd_instance_ns }}"
+          type: Opaque
+          stringData:
+            cpd-api-key: "{{ api_key }}"
+
+    - name: Get all existing WxO instances
+      ansible.builtin.command: >
+        curl -L 'https://{{ cpd_url }}/zen-data/v3/service_instances?addon_type=orchestrate' \
+        --insecure \
+        -H 'Accept: application/json' \
+        -H 'Authorization: Bearer {{ auth_token }}'
+      register: existing_instances_response
+      no_log: true
+
+    - name: Parse existing instances
+      ansible.builtin.set_fact:
+        existing_wxo_instances: "{{ (existing_instances_response.stdout | from_json).service_instances | default([]) }}"
+
+    - name: Initialize tenant ID mapping
+      ansible.builtin.set_fact:
+        wxo_tenant_ids: {}
+
+    - name: Process each WxO instance
+      include_tasks: process-instance.yaml
+      loop: "{{ wxo_instances }}"
+      loop_control:
+        loop_var: wxo_instance
+
+    - name: Create ConfigMap with all tenant IDs
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: wxo-tenant-ids
+            namespace: "{{ cpd_instance_ns }}"
+            labels:
+              app: watsonx-orchestrate
+              managed-by: ansible
+          data: "{{ wxo_tenant_ids }}"
+
+    - name: Display created instances summary
+      ansible.builtin.debug:
+        msg: |
+          WatsonX Orchestrate Instances Summary:
+          {% for instance_name, tenant_id in wxo_tenant_ids.items() %}
+          - {{ instance_name }}: {{ tenant_id }}
+          {% endfor %}
+
+
+- name: Run the steps to delete WxO Instances
+  tags: uninstall
+  block:
+
+    - name: Get CPD admin credentials from secret
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: ibm-iam-bindinfo-platform-auth-idp-credentials
+        namespace: "{{ cpd_instance_ns }}"
+      register: cpd_secret
+
+    - name: Get CPD Route
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Route
+        name: cpd
+        namespace: "{{ cpd_instance_ns }}"
+      register: cpd_route
+
+    - name: Set CPD URL
+      ansible.builtin.set_fact:
+        cpd_url: "{{ cpd_route.resources[0].spec.host }}"
+
+    - name: Extract admin password
+      ansible.builtin.set_fact:
+        admin_password: "{{ cpd_secret.resources[0].data.admin_password | b64decode }}"
+
+    - name: Generate auth token
+      ansible.builtin.command: >
+        curl -L 'https://{{ cpd_url }}/icp4d-api/v1/authorize' \
+        -H 'cache-control: no-cache' \
+        -H 'Content-Type: application/json' \
+        --data '{"username":"cpadmin","password":"{{ admin_password }}"}' --insecure
+      register: auth_token_output
+      no_log: true
+
+    - name: Set auth token
+      ansible.builtin.set_fact:
+        auth_token: "{{ (auth_token_output.stdout | from_json).token }}"
+      no_log: true
+
+    # --- Single instance deletion (wxo_tenant_id is set) ---
+
+    - name: Delete single WxO instance by tenant ID
+      ansible.builtin.command: >
+        curl -L -X DELETE 'https://{{ cpd_url }}/zen-data/v3/service_instances/{{ wxo_tenant_id }}' \
+        --insecure \
+        -H 'Accept: application/json' \
+        -H 'Authorization: Bearer {{ auth_token }}'
+      register: single_instance_deletion
+      when: wxo_tenant_id | default('') | length > 0
+      no_log: true
+
+    - name: Display single instance deletion result
+      ansible.builtin.debug:
+        msg: "Deleted WxO instance with tenant ID: {{ wxo_tenant_id }}"
+      when: wxo_tenant_id | default('') | length > 0
+
+    # --- Bulk instance deletion (wxo_tenant_id is not set) ---
+
+    - name: Get all existing WxO instances
+      ansible.builtin.command: >
+        curl -L 'https://{{ cpd_url }}/zen-data/v3/service_instances?addon_type=orchestrate' \
+        --insecure \
+        -H 'Accept: application/json' \
+        -H 'Authorization: Bearer {{ auth_token }}'
+      register: existing_instances_response
+      when: wxo_tenant_id | default('') | length == 0
+      no_log: true
+
+    - name: Parse existing instances
+      ansible.builtin.set_fact:
+        existing_wxo_instances: "{{ (existing_instances_response.stdout | from_json).service_instances | default([]) }}"
+      when: wxo_tenant_id | default('') | length == 0
+
+    - name: Delete each WxO instance
+      include_tasks: delete-instance.yaml
+      loop: "{{ wxo_instances }}"
+      loop_control:
+        loop_var: wxo_instance
+      when: wxo_tenant_id | default('') | length == 0
+
+    - name: Delete wxo-tenant-ids ConfigMap
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: ConfigMap
+        name: wxo-tenant-ids
+        namespace: "{{ cpd_instance_ns }}"
+      when: wxo_tenant_id | default('') | length == 0

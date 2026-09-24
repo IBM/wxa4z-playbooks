@@ -1,0 +1,191 @@
+# NVIDIA GPU Operator Installation Role
+# This role installs the NVIDIA GPU Operator on OpenShift for x86_64 architecture only
+# Documentation: https://docs.nvidia.com/datacenter/cloud-native/openshift/24.9.2/index.html
+
+---
+- name: Verify nvidia_gpu_enabled before proceeding
+  ansible.builtin.fail:
+    msg: |
+      ABORTED: nvidia_gpu_enabled is set to false in your vars file.
+      The NVIDIA GPU Operator role requires NVIDIA GPU support to be enabled.
+      To proceed, set nvidia_gpu_enabled: true in your global vars file and re-run.
+      Playbook execution has been halted — no resources have been applied to the cluster.
+  when: not (nvidia_gpu_enabled | default(false) | bool)
+  tags:
+    - always
+
+- name: Install NVIDIA GPU Operator
+  tags: install
+  when:
+    - ansible_architecture == "x86_64"
+  block:
+    - name: Create nvidia-gpu-operator namespace
+      kubernetes.core.k8s:
+        state: present
+        src: files/namespace.yaml
+
+    - name: Create operator group for NVIDIA GPU Operator
+      kubernetes.core.k8s:
+        state: present
+        src: files/operator-group.yaml
+
+    - name: Create subscription for NVIDIA GPU Operator
+      kubernetes.core.k8s:
+        state: present
+        src: files/subscription.yaml
+
+    - name: Wait for install plan to be created
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        namespace: nvidia-gpu-operator
+      register: install_plans
+      until: install_plans.resources | length > 0
+      retries: 30
+      delay: 10
+
+    - name: Get the install plan name
+      ansible.builtin.set_fact:
+        install_plan_name: "{{ install_plans.resources[0].metadata.name }}"
+
+    - name: Display install plan for manual approval
+      ansible.builtin.debug:
+        msg: |
+          Install plan created: {{ install_plan_name }}
+          Approve it with: oc patch installplan {{ install_plan_name }} -n nvidia-gpu-operator --type merge -p '{"spec":{"approved":true}}'
+
+    - name: Approve install plan
+      kubernetes.core.k8s:
+        state: patched
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        name: "{{ install_plan_name }}"
+        namespace: nvidia-gpu-operator
+        definition:
+          spec:
+            approved: true
+
+    - name: Wait for GPU operator CSV to be succeeded
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: nvidia-gpu-operator
+        name: gpu-operator-certified.v26.3.1
+      register: csv_status
+      until: 
+        - csv_status.resources | length > 0
+        - csv_status.resources[0].status.phase == "Succeeded"
+      retries: 60
+      delay: 10
+
+    - name: Create cluster policy for GPU operator
+      kubernetes.core.k8s:
+        state: present
+        src: files/cluster-policy.yaml
+
+    - name: Wait for cluster policy to be ready (may take ~5 minutes)
+      kubernetes.core.k8s_info:
+        api_version: nvidia.com/v1
+        kind: ClusterPolicy
+        name: gpu-cluster-policy
+      register: cluster_policy_status
+      until:
+        - cluster_policy_status.resources | length > 0
+        - cluster_policy_status.resources[0].status.state is defined
+        - cluster_policy_status.resources[0].status.state == "ready"
+      retries: 60
+      delay: 10
+      ignore_errors: true
+
+    - name: Verify CDI is disabled in cluster policy
+      ansible.builtin.command: >
+        oc get clusterpolicy gpu-cluster-policy -o jsonpath='{.spec.cdi}' 
+      register: cdi_status
+      changed_when: false
+
+    - name: Display CDI status
+      ansible.builtin.debug:
+        msg: "CDI Status: {{ cdi_status.stdout }}"
+
+    - name: Verify CDI is properly configured
+      ansible.builtin.assert:
+        that:
+          - "'\"enabled\":false' in cdi_status.stdout"
+          - "'\"default\":false' in cdi_status.stdout"
+        fail_msg: "CDI is not properly disabled. Expected enabled:false and default:false"
+        success_msg: "CDI is properly disabled"
+
+    - name: Get all pods in nvidia-gpu-operator namespace
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: nvidia-gpu-operator
+      register: gpu_pods
+
+    - name: Display GPU operator pods status
+      ansible.builtin.debug:
+        msg: "{{ gpu_pods.resources | map(attribute='metadata.name') | list }}"
+
+    - name: Get daemonsets in nvidia-gpu-operator namespace
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: DaemonSet
+        namespace: nvidia-gpu-operator
+      register: gpu_daemonsets
+
+    - name: Display GPU operator daemonsets
+      ansible.builtin.debug:
+        msg: "{{ gpu_daemonsets.resources | map(attribute='metadata.name') | list }}"
+
+- name: Uninstall NVIDIA GPU Operator
+  tags: uninstall
+  when:
+    - ansible_architecture == "x86_64"
+  block:
+    - name: Delete cluster policy
+      kubernetes.core.k8s:
+        state: absent
+        api_version: nvidia.com/v1
+        kind: ClusterPolicy
+        name: gpu-cluster-policy
+
+    - name: Delete subscription
+      kubernetes.core.k8s:
+        state: absent
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: gpu-operator-certified
+        namespace: nvidia-gpu-operator
+
+    - name: Delete CSV
+      kubernetes.core.k8s:
+        state: absent
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: gpu-operator-certified.v26.3.1
+        namespace: nvidia-gpu-operator
+
+    - name: Delete operator group
+      kubernetes.core.k8s:
+        state: absent
+        api_version: operators.coreos.com/v1
+        kind: OperatorGroup
+        name: nvidia-gpu-operator-group
+        namespace: nvidia-gpu-operator
+
+    - name: Delete namespace
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Namespace
+        name: nvidia-gpu-operator
+
+- name: Skip NVIDIA GPU Operator installation (non-x86_64 architecture)
+  tags: install
+  when: ansible_architecture != "x86_64"
+  block:
+    - name: Display skip message
+      ansible.builtin.debug:
+        msg: |
+          Skipping NVIDIA GPU Operator installation — not applicable on {{ ansible_architecture }}.
+          This role only installs on x86_64 architecture.

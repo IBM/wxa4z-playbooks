@@ -1,0 +1,115 @@
+# Tasks in this file are from documentation provided here:
+# https://www.ibm.com/docs/en/software-hub/5.3.x?topic=hub-creating-cluster-scoped-resources
+
+- name: Download the Software Hub cases
+  block:
+    - name: Download Scheduler case
+      ansible.builtin.command: >
+        cpd-cli manage case-download
+        --components=scheduler
+        --release={{ cpd_version }}
+        --scheduler_ns={{ cpd_scheduler_ns }}
+        --cluster_resources=true
+        {% if cpd_version == '5.3.1' %}--patch_download=false{% endif %}
+      changed_when: false
+      when:
+        - ansible_architecture == "x86_64"
+        - not (skip_scheduler | default(false) | bool)
+
+    - name: Check if patch folder exists in offline work directory
+      ansible.builtin.stat:
+        path: "{{ path_cpd_cli_workspace }}/work/offline/patch"
+      register: offline_patch_dir
+
+    - name: Delete patch folder from offline work directory
+      ansible.builtin.file:
+        path: "{{ path_cpd_cli_workspace }}/work/offline/patch"
+        state: absent
+      become: true
+      when: offline_patch_dir.stat.exists and offline_patch_dir.stat.isdir
+
+    - name: Fix YAML formatting issues in cluster_scoped_resources.yaml (Scheduler)
+      ansible.builtin.replace:
+        path: "{{ path_cpd_cli_workspace }}/work/cluster_scoped_resources.yaml"
+        regexp: '\t'
+        replace: '  '
+      changed_when: false
+      when:
+        - ansible_architecture == "x86_64"
+        - not (skip_scheduler | default(false) | bool)
+
+    - name: Apply cluster-scoped resources for Scheduler
+      kubernetes.core.k8s:
+        apply: true
+        src: "{{ path_cpd_cli_workspace }}/work/cluster_scoped_resources.yaml"
+        server_side_apply:
+          field_manager: "ansible"
+          force_conflicts: true
+      when:
+        - ansible_architecture == "x86_64"
+        - not (skip_scheduler | default(false) | bool)
+
+    - name: Ensure outputs directory exists
+      ansible.builtin.file:
+        path: "{{ software_hub_outputs_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy Scheduler cluster-scoped resources to outputs directory
+      ansible.builtin.copy:
+        src: "{{ path_cpd_cli_workspace }}/work/cluster_scoped_resources.yaml"
+        dest: "{{ software_hub_outputs_dir }}/scheduler-{{ cpd_version }}-cluster_scoped_resources.yaml"
+        mode: '0644'
+      when:
+        - ansible_architecture == "x86_64"
+        - not (skip_scheduler | default(false) | bool)
+    
+    - name: Download the SoftwareHub Case package from Github (github.com/IBM)
+      ansible.builtin.command: >
+        cpd-cli manage case-download
+        --components=cpd_platform,ibm-licensing
+        --release={{ cpd_version }}
+        --operator_ns={{ cpd_operators_ns }}
+        --licensing_ns={{ licensing_ns }}
+        --cluster_resources=true
+        {% if cpd_version == '5.3.1' %}--patch_download=false{% endif %}
+      changed_when: false
+
+    - name: Check if patch folder exists in offline work directory
+      ansible.builtin.stat:
+        path: "{{ path_cpd_cli_workspace }}/work/offline/patch"
+      register: offline_patch_dir
+
+    - name: Delete patch folder from offline work directory
+      ansible.builtin.file:
+        path: "{{ path_cpd_cli_workspace }}/work/offline/patch"
+        state: absent
+      become: true
+      when: offline_patch_dir.stat.exists and offline_patch_dir.stat.isdir
+
+    - name: Fix YAML formatting issues in cluster_scoped_resources.yaml
+      ansible.builtin.replace:
+        path: "{{ path_cpd_cli_workspace }}/work/cluster_scoped_resources.yaml"
+        regexp: '\t'
+        replace: '  '
+      changed_when: false
+
+    - name: Apply cluster-scoped resources for Software Hub
+      kubernetes.core.k8s:
+        apply: true
+        src: "{{ path_cpd_cli_workspace }}/work/cluster_scoped_resources.yaml"
+        server_side_apply:
+          field_manager: "ansible"
+          force_conflicts: true
+
+    - name: Ensure outputs directory exists
+      ansible.builtin.file:
+        path: "{{ software_hub_outputs_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy Software Hub cluster-scoped resources to outputs directory
+      ansible.builtin.copy:
+        src: "{{ path_cpd_cli_workspace }}/work/cluster_scoped_resources.yaml"
+        dest: "{{ software_hub_outputs_dir }}/cpd_platform-{{ cpd_version }}-cluster_scoped_resources.yaml"
+        mode: '0644'

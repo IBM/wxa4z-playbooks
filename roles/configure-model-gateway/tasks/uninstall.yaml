@@ -1,0 +1,135 @@
+---
+# =============================================================================
+# UNINSTALL CONFIGURATION
+# Remove model gateway configuration (works for both IFM and AIO)
+# =============================================================================
+
+# -------------------------------------------------------------------------
+# Step 1: Activate WXO Environment
+# Note: CPD credentials and environment_name are extracted in common steps
+# -------------------------------------------------------------------------
+
+- name: Activate WXO environment for uninstall
+  ansible.builtin.command: >
+    orchestrate env activate
+    --username=cpadmin
+    --password={{ cpd_password }}
+    {{ environment_name }}
+  register: env_activate_result
+  changed_when: env_activate_result.rc == 0
+  failed_when: false
+
+- name: Check if environment exists
+  ansible.builtin.set_fact:
+    environment_exists: "{{ env_activate_result.rc == 0 }}"
+
+- name: Display environment not found message
+  ansible.builtin.debug:
+    msg: |
+      ============================================================
+      WXO Environment '{{ environment_name }}' does not exist.
+      Nothing to uninstall. Skipping remaining uninstall steps.
+      ============================================================
+  when: not environment_exists
+
+- name: Display environment activation status
+  ansible.builtin.debug:
+    var: env_activate_result.stdout
+  when: environment_exists
+
+# -------------------------------------------------------------------------
+# Step 3: List virtual models
+# -------------------------------------------------------------------------
+
+- name: List virtual models
+  ansible.builtin.shell: orchestrate models list --raw | grep virtual-model
+  register: virtual_models_output
+  failed_when: false
+  changed_when: false
+  when: environment_exists
+
+- name: Display virtual models found
+  ansible.builtin.debug:
+    msg: "{{ virtual_models_output.stdout_lines if virtual_models_output.stdout_lines else 'No virtual models found' }}"
+  when: environment_exists
+
+# -------------------------------------------------------------------------
+# Step 4: Extract model names and remove them
+# Output format: - ✨️ virtual-model/openai/ibm/granite-3-3-8b-instruct: description
+# We need to extract: virtual-model/openai/ibm/granite-3-3-8b-instruct
+# -------------------------------------------------------------------------
+
+- name: Extract model names from output
+  ansible.builtin.set_fact:
+    model_names: "{{ virtual_models_output.stdout_lines | map('regex_replace', '^-\\s+[^\\s]+\\s+([^:]+):.*$', '\\1') | list }}"
+  when:
+    - environment_exists
+    - virtual_models_output.stdout_lines | length > 0
+
+- name: Display extracted model names
+  ansible.builtin.debug:
+    var: model_names
+  when:
+    - environment_exists
+    - virtual_models_output.stdout_lines | length > 0
+
+# -------------------------------------------------------------------------
+# Step 5: Remove each model
+# -------------------------------------------------------------------------
+
+- name: Remove virtual models
+  ansible.builtin.command: >
+    orchestrate models remove -n {{ item }}
+  loop: "{{ model_names }}"
+  register: model_remove_result
+  changed_when: model_remove_result.rc == 0
+  when:
+    - environment_exists
+    - virtual_models_output.stdout_lines | length > 0
+
+# -------------------------------------------------------------------------
+# Step 6: Remove Connection
+# -------------------------------------------------------------------------
+
+- name: Remove connection
+  ansible.builtin.command: >
+    orchestrate connections remove -a {{ connection_name }}
+  register: connection_remove_result
+  changed_when: connection_remove_result.rc == 0
+  failed_when: false
+  when: environment_exists
+
+- name: Display connection removal status
+  ansible.builtin.debug:
+    var: connection_remove_result.stdout
+  when: environment_exists
+
+# -------------------------------------------------------------------------
+# Step 7: Remove Environment
+# Automatically answers 'y' to the confirmation prompt
+# -------------------------------------------------------------------------
+
+- name: Remove environment (with auto-confirmation)
+  ansible.builtin.shell: >
+    echo "y" | orchestrate env remove -n {{ environment_name }}
+  register: env_remove_result
+  changed_when: env_remove_result.rc == 0
+  failed_when: false
+  when: environment_exists
+
+- name: Display environment removal status
+  ansible.builtin.debug:
+    var: env_remove_result.stdout
+  when: environment_exists
+
+- name: Display uninstall completion message
+  ansible.builtin.debug:
+    msg: |
+      ============================================================
+      Model Gateway uninstall completed!
+      
+      Environment: {{ environment_name }}
+      Connection: {{ connection_name }}
+      Models removed: {{ model_names | default(['None']) | join(', ') }}
+      ============================================================
+  when: environment_exists

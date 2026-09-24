@@ -1,0 +1,153 @@
+---
+# =============================================================================
+# IFM-SPECIFIC CONFIGURATION
+# Reference: https://www.ibm.com/docs/en/watsonx/waz/3.2.0?topic=gateway-configure-watsonx-ifm-model-connection
+# =============================================================================
+
+# -------------------------------------------------------------------------
+# Validation
+# -------------------------------------------------------------------------
+
+- name: Validate IFM required variables
+  ansible.builtin.fail:
+    msg: "IFM requires 'cpd_api_key' to be set (non-empty). Set it in vars/global.yaml or ensure the cpd-api-key secret exists in {{ cpd_instance_ns }}."
+  when: cpd_api_key is not defined or cpd_api_key == ''
+
+# -------------------------------------------------------------------------
+# Step 1: Get CPD Host URL from Route
+# -------------------------------------------------------------------------
+
+- name: Get CPD route
+  ansible.builtin.command: oc get route cpd -n cpd-instance-1 -o jsonpath='{.spec.host}'
+  register: cpd_route_result
+  changed_when: false
+
+- name: Set CPD host URL
+  ansible.builtin.set_fact:
+    cpd_host_url: "https://{{ cpd_route_result.stdout }}"
+
+# -------------------------------------------------------------------------
+# Step 2: Add Connection
+# -------------------------------------------------------------------------
+
+- name: Add IFM connection
+  ansible.builtin.command: >
+    orchestrate connections add
+    -a {{ connection_name }}
+  register: connection_add_result
+  changed_when: "'Creating connection' in connection_add_result.stdout and connection_add_result.rc == 0"
+  failed_when: connection_add_result.rc != 0 and 'already exists' not in connection_add_result.stdout
+
+# -------------------------------------------------------------------------
+# Step 3: Configure Connection (Draft and Live)
+# -------------------------------------------------------------------------
+
+- name: Configure IFM connection for draft environment
+  ansible.builtin.command: >
+    orchestrate connections configure
+    -a {{ connection_name }}
+    --kind=key_value
+    --env=draft
+    --type=team
+  register: connection_config_draft_result
+  changed_when: connection_config_draft_result.rc == 0 and 'Existing connection' not in connection_config_draft_result.stdout
+  failed_when: false
+
+- name: Configure IFM connection for live environment
+  ansible.builtin.command: >
+    orchestrate connections configure
+    -a {{ connection_name }}
+    --kind=key_value
+    --env=live
+    --type=team
+  register: connection_config_live_result
+  changed_when: connection_config_live_result.rc == 0 and 'Existing connection' not in connection_config_live_result.stdout
+  failed_when: false
+
+# -------------------------------------------------------------------------
+# Step 4: Set Credentials for Connection (Draft and Live)
+# -------------------------------------------------------------------------
+
+- name: Set IFM credentials for draft environment
+  ansible.builtin.command: >
+    orchestrate connections set-credentials
+    -a {{ connection_name }}
+    --env draft
+    -e api_key={{ cpd_api_key }}
+    -e watsonx_cpd_url={{ cpd_host_url }}
+    -e watsonx_cpd_username=cpadmin
+    -e watsonx_cpd_password={{ cpd_password }}
+  register: credentials_draft_result
+  changed_when: credentials_draft_result.rc == 0
+  failed_when: false
+  no_log: true
+
+- name: Set IFM credentials for live environment
+  ansible.builtin.command: >
+    orchestrate connections set-credentials
+    -a {{ connection_name }}
+    --env live
+    -e api_key={{ cpd_api_key }}
+    -e watsonx_cpd_url={{ cpd_host_url }}
+    -e watsonx_cpd_username=cpadmin
+    -e watsonx_cpd_password={{ cpd_password }}
+  register: credentials_live_result
+  changed_when: credentials_live_result.rc == 0
+  failed_when: false
+  no_log: true
+
+# -------------------------------------------------------------------------
+# Step 5: Import the Granite Model
+# -------------------------------------------------------------------------
+
+- name: Import granite model for IFM
+  ansible.builtin.command: >
+    orchestrate models import
+    --file {{ role_path }}/files/granite-ifm.yaml
+    --app-id {{ connection_name }}
+  register: model_import_result
+  changed_when: model_import_result.rc == 0 and 'Existing model' not in model_import_result.stdout
+  failed_when: model_import_result.rc != 0 and 'Conflict' not in model_import_result.stderr and 'default' not in model_import_result.stderr
+  retries: 5
+  delay: 10
+  until: >-
+    model_import_result.rc == 0
+    or 'Conflict' in model_import_result.stderr
+    or 'default' in model_import_result.stderr
+
+- name: Display IFM configuration completion
+  ansible.builtin.debug:
+    msg: |
+      {% if model_import_result.rc == 0 and 'Existing model' not in model_import_result.stdout %}
+      ============================================================
+      Model Gateway configuration for IFM completed successfully!
+      
+      Environment: {{ environment_name }}
+      Connection: {{ connection_name }}
+      Model: watsonx/ibm/granite-3-3-8b-instruct
+      CPD URL: {{ cpd_host_url }}
+      Status: Model imported successfully
+      ============================================================
+      {% elif model_import_result.rc == 0 and 'Existing model' in model_import_result.stdout %}
+      ============================================================
+      Model Gateway configuration for IFM completed!
+      
+      Environment: {{ environment_name }}
+      Connection: {{ connection_name }}
+      Model: watsonx/ibm/granite-3-3-8b-instruct
+      CPD URL: {{ cpd_host_url }}
+      Status: Model already exists and was updated
+      ============================================================
+      {% elif model_import_result.rc != 0 and 'Conflict' in model_import_result.stderr %}
+      ============================================================
+      Model import skipped (already exists as default LLM)
+      
+      No changes made to Model Gateway configuration.
+      The model is already configured and active.
+      
+      Environment: {{ environment_name }}
+      Connection: {{ connection_name }}
+      Model: watsonx/ibm/granite-3-3-8b-instruct
+      CPD URL: {{ cpd_host_url }}
+      ============================================================
+      {% endif %}
