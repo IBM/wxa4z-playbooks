@@ -1,0 +1,12 @@
+# Cert-Manager operator configuration
+
+cert_manager_namespace: cert-manager-operator
+cert_manager_subscription_name: openshift-cert-manager-operator
+cert_manager_channel: stable-v1
+cert_manager_source: redhat-operators
+cert_manager_source_namespace: openshift-marketplace
+cert_manager_install_plan_approval: Automatic
+
+# Wait timeouts
+cert_manager_csv_wait_retries: 30
+cert_manager_csv_wait_delay: 20

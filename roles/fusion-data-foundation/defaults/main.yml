@@ -1,0 +1,45 @@
+---
+# Fusion Data Foundation configuration
+
+# Namespace and operator settings
+fdf_namespace: ibm-spectrum-fusion-ns
+fdf_operator_group_name: ibm-spectrum-fusion-ns-czvsk
+fdf_subscription_name: isf-operator
+fdf_channel: v2.0
+fdf_catalog_source: ibm-operator-catalog
+fdf_install_plan_approval: Manual
+
+# Storage configuration
+fdf_storage_class: fdf-localvolume
+fdf_min_disk_size: 10Gi
+fdf_storage_cluster_name: ocs-storagecluster
+fdf_storage_cluster_namespace: openshift-storage
+fdf_local_storage_namespace: openshift-local-storage
+
+# Service instance configuration
+fdf_service_instance_name: odfmanager
+
+# Wait timeouts for various resources
+fdf_subscription_wait_retries: 30
+fdf_subscription_wait_delay: 10
+
+fdf_csv_wait_retries: 30
+fdf_csv_wait_delay: 10
+
+fdf_spectrum_fusion_wait_retries: 30
+fdf_spectrum_fusion_wait_delay: 10
+
+fdf_service_instance_wait_retries: 60
+fdf_service_instance_wait_delay: 30
+
+fdf_localvolume_wait_retries: 20
+fdf_localvolume_wait_delay: 10
+
+fdf_storagecluster_crd_wait_retries: 60
+fdf_storagecluster_crd_wait_delay: 10
+
+fdf_storagecluster_wait_retries: 60
+fdf_storagecluster_wait_delay: 30
+
+fdf_namespace_delete_wait_retries: 30
+fdf_namespace_delete_wait_delay: 10

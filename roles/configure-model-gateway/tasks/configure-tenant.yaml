@@ -1,0 +1,139 @@
+---
+# =============================================================================
+# CONFIGURE TENANT
+# Called once per tenant in the main configure loop.
+# Receives `current_tenant` (an object from `discovered_tenants`):
+#   { name, id, namespace, env_name, service_instance_url, current_model,
+#     detection_failed }
+#
+# Responsibilities:
+#   1. Hard-skip tenants where model detection failed (env activate could not
+#      be verified) — configuration would be unsafe without knowing current state.
+#   2. Skip tenants that already have a default model configured (warn, don't
+#      overwrite) — only for configure tags (aio/rhaiis/ifm), not uninstall.
+#   3. Add + activate the ADK environment for this tenant.
+#   4. Delegate to the stack-specific task file (aio/rhaiis/ifm).
+#   5. Record the outcome in mgw_succeeded / mgw_skipped lists.
+# =============================================================================
+
+# ── Detection failure check ───────────────────────────────────────────────────
+# If env activate failed during discovery, we cannot know the current model
+# state. Skip and warn rather than risk overwriting an existing configuration.
+
+- name: "Record detection-failed tenant '{{ current_tenant.name }}'"
+  ansible.builtin.set_fact:
+    mgw_skipped: >-
+      {{ hostvars[inventory_hostname]['mgw_skipped'] + [{
+        'name':   current_tenant.name,
+        'id':     current_tenant.id,
+        'reason': 'Model detection failed during discovery (env activate error). Cannot safely configure — check ADK connectivity and re-run.'
+      }] }}
+  when: current_tenant.detection_failed | default(false) | bool
+
+- name: "Skip configuration for tenant '{{ current_tenant.name }}' (detection failed)"
+  ansible.builtin.debug:
+    msg: |
+      SKIPPED  {{ current_tenant.name }} ({{ current_tenant.id }})
+               Reason: model detection failed during discovery — env activate could not
+               be completed. Cannot safely configure without knowing current state.
+               Check ADK connectivity and re-run.
+  when: current_tenant.detection_failed | default(false) | bool
+
+# ── Skip check (configure tags only) ─────────────────────────────────────────
+# If the tenant already has a default model, skip it and record a warning.
+
+- name: "Check if tenant '{{ current_tenant.name }}' should be skipped"
+  ansible.builtin.set_fact:
+    _tenant_skip: >-
+      {{ (current_tenant.detection_failed | default(false) | bool)
+         or (current_tenant.current_model not in [none, '', '(none)']) }}
+
+- name: "Record skipped tenant '{{ current_tenant.name }}' (model already configured)"
+  ansible.builtin.set_fact:
+    mgw_skipped: >-
+      {{ hostvars[inventory_hostname]['mgw_skipped'] + [{
+        'name':   current_tenant.name,
+        'id':     current_tenant.id,
+        'reason': 'Existing default model found (' + current_tenant.current_model + '). Uninstall first then re-run.'
+      }] }}
+  when:
+    - not (current_tenant.detection_failed | default(false) | bool)
+    - current_tenant.current_model not in [none, '', '(none)']
+
+- name: "Skip configuration for tenant '{{ current_tenant.name }}' (model already configured)"
+  ansible.builtin.debug:
+    msg: |
+      SKIPPED  {{ current_tenant.name }} ({{ current_tenant.id }})
+               Reason: existing default model '{{ current_tenant.current_model }}'.
+               Run with --tags uninstall first, then re-run to reconfigure.
+  when:
+    - not (current_tenant.detection_failed | default(false) | bool)
+    - current_tenant.current_model not in [none, '', '(none)']
+
+# Everything below only runs when the tenant does NOT have an existing model.
+
+# ── Activate ADK environment ──────────────────────────────────────────────────
+# env add was already called during the discovery phase (detect-tenant-model.yaml)
+# for the same env_name. We only need to re-activate to switch the ADK context
+# to this tenant before running the stack-specific steps.
+
+- name: "Activate ADK environment for tenant '{{ current_tenant.name }}'"
+  ansible.builtin.command: >
+    orchestrate env activate
+    --username=cpadmin
+    --password={{ cpd_password }}
+    {{ current_tenant.env_name }}
+  register: _ct_env_activate
+  changed_when: _ct_env_activate.rc == 0
+  retries: "{{ mgw_max_retries | default(3) }}"
+  delay: "{{ mgw_retry_delay | default(10) }}"
+  until: _ct_env_activate.rc == 0
+  when: not (_tenant_skip | bool)
+
+- name: "Display env activation for '{{ current_tenant.name }}'"
+  ansible.builtin.debug:
+    msg: |
+      Tenant : {{ current_tenant.name }}  [{{ current_tenant.id }}]
+      Env    : {{ current_tenant.env_name }}
+      URL    : {{ current_tenant.service_instance_url }}
+  when: not (_tenant_skip | bool)
+
+# ── Set per-tenant connection name ────────────────────────────────────────────
+# Scoped to the env_name so each tenant gets its own connection, matching the
+# pattern used in configure_model_gateway.sh.
+
+- name: "Set per-tenant connection name for '{{ current_tenant.name }}'"
+  ansible.builtin.set_fact:
+    connection_name: "{{ current_tenant.env_name }}-mgw-credentials"
+  when: not (_tenant_skip | bool)
+
+# ── Delegate to stack-specific task file ──────────────────────────────────────
+
+- name: "Configure Model Gateway for tenant '{{ current_tenant.name }}' (aio)"
+  ansible.builtin.include_tasks: aio.yaml
+  when:
+    - not (_tenant_skip | bool)
+    - "'aio' in ansible_run_tags"
+
+- name: "Configure Model Gateway for tenant '{{ current_tenant.name }}' (rhaiis)"
+  ansible.builtin.include_tasks: rhaiis.yaml
+  when:
+    - not (_tenant_skip | bool)
+    - "'rhaiis' in ansible_run_tags"
+
+- name: "Configure Model Gateway for tenant '{{ current_tenant.name }}' (ifm)"
+  ansible.builtin.include_tasks: ifm.yaml
+  when:
+    - not (_tenant_skip | bool)
+    - "'ifm' in ansible_run_tags"
+
+# ── Record success ─────────────────────────────────────────────────────────────
+
+- name: "Record successful tenant '{{ current_tenant.name }}'"
+  ansible.builtin.set_fact:
+    mgw_succeeded: >-
+      {{ hostvars[inventory_hostname]['mgw_succeeded'] + [{
+        'name': current_tenant.name,
+        'id':   current_tenant.id
+      }] }}
+  when: not (_tenant_skip | bool)

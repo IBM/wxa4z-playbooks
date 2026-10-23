@@ -1,0 +1,18 @@
+{% if wxo_inferencing_stack == 'ifm' %}
+{% set watsonxaiifm_enabled = wxo_internal_ifm | bool %}
+{% else %}
+{% set watsonxaiifm_enabled = false %}
+{% endif %}
+non_olm:
+  watsonxOrchestrate:
+    installMode: "{{ wxo_install_mode }}"
+    uab:
+      enabled: false
+    size: "{{ wxo_size }}"
+    watsonxAI:
+      watsonxaiifm: {{ watsonxaiifm_enabled | lower }}
+{% if ansible_architecture == 'x86_64' and wxo_ootb_models is defined %}
+      ootbModels: {{ wxo_ootb_models | to_json }}
+{% elif ansible_architecture == 's390x' and wxo_ootb_models_s390x is defined %}
+      ootbModels: "{{ wxo_ootb_models_s390x }}"
+{% endif %}

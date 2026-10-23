@@ -1,0 +1,7 @@
+apiVersion: project.openshift.io/v1
+kind: Project
+metadata:
+  name: "{{ cpd_operators_ns }}"
+  annotations:
+    openshift.io/display-name: "Software Hub Operators"
+    openshift.io/description: "Project for Software Hub operator installations and resources"

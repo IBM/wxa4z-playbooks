@@ -1,0 +1,105 @@
+---
+# =============================================================================
+# UNINSTALL CONFIGURATION
+# Removes model gateway configuration for all tenants in scope (target_tenants).
+# Does NOT use the skip logic — user explicitly wants to remove, so any tenant
+# with or without a model is processed.
+#
+# Fetches tenants via CPD API (auth_token and cpd_url set in main.yaml),
+# filters by target_tenants, then for each tenant:
+#   1. Activates the ADK environment.
+#   2. Lists and removes all virtual models.
+#   3. Removes the connection.
+#   4. Removes the ADK environment.
+# Prints a summary at the end.
+# =============================================================================
+
+# ── Tenant discovery for uninstall ───────────────────────────────────────────
+
+- name: Fetch all WxO tenants for uninstall
+  ansible.builtin.uri:
+    url: "https://{{ cpd_url }}/zen-data/v3/service_instances?addon_type=orchestrate"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ auth_token }}"
+      Accept: "application/json"
+    validate_certs: false
+    status_code: 200
+  register: _uninst_tenants_response
+  changed_when: false
+  no_log: true
+
+- name: Parse tenant list for uninstall
+  ansible.builtin.set_fact:
+    _uninst_all_tenants: "{{ _uninst_tenants_response.json.service_instances | default([]) }}"
+
+- name: Build filtered tenant list for uninstall
+  ansible.builtin.set_fact:
+    _uninst_tenants: >-
+      {%- set tt = target_tenants | default(-1) -%}
+      {%- if tt | string == '-1' -%}
+        {{ _uninst_all_tenants }}
+      {%- else -%}
+        {%- set tokens = (tt if tt is iterable and tt is not string else [tt | string])
+                         | map('lower') | map('trim') | list -%}
+        {%- set result = [] -%}
+        {%- for t in _uninst_all_tenants -%}
+          {%- if (t.id | default('') | string | lower) in tokens
+               or (t.display_name | default('') | lower) in tokens -%}
+            {%- set _ = result.append(t) -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {{ result }}
+      {%- endif -%}
+
+- name: Fail if target_tenants filter matched nothing (uninstall)
+  ansible.builtin.fail:
+    msg: |
+      ============================================================
+      ERROR: target_tenants matched no tenants.
+
+      Available tenants on this CPD deployment:
+      {% for t in _uninst_all_tenants %}
+        - {{ t.display_name }} (id: {{ t.id }})
+      {% endfor %}
+
+      Provide exact tenant display names or set target_tenants: -1 to target all tenants.
+      ============================================================
+  when:
+    - target_tenants | default(-1) | string != '-1'
+    - _uninst_tenants | length == 0
+
+- name: Initialise uninstall result accumulators
+  ansible.builtin.set_fact:
+    uninst_succeeded: []
+    uninst_skipped: []
+
+# ── Per-tenant uninstall loop ─────────────────────────────────────────────────
+
+- name: Uninstall Model Gateway per tenant
+  ansible.builtin.include_tasks:
+    file: uninstall-tenant.yaml
+    apply:
+      tags: uninstall
+  tags: uninstall
+  loop: "{{ _uninst_tenants }}"
+  loop_control:
+    loop_var: uninst_tenant
+    label: "{{ uninst_tenant.display_name }}"
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+- name: Display uninstall summary
+  ansible.builtin.command:
+    argv:
+      - bash
+      - "{{ role_path }}/files/print-run-summary.sh"
+      - "{{ uninst_succeeded | to_json }}"
+      - "{{ uninst_skipped | to_json }}"
+      - "--uninstall"
+  register: _uninst_summary
+  changed_when: false
+
+- name: Print uninstall summary
+  ansible.builtin.debug:
+    msg: "{{ _uninst_summary.stdout_lines }}"

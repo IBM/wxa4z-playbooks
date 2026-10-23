@@ -1,0 +1,51 @@
+apiVersion: ocs.openshift.io/v1
+kind: StorageCluster
+metadata:
+  name: "{{ fdf_storage_cluster_name }}"
+  namespace: "{{ fdf_storage_cluster_namespace }}"
+spec:
+  storageDeviceSets:
+    - config: {}
+      count: 3
+      dataPVCTemplate:
+        metadata: {}
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: '1'
+          storageClassName: "{{ fdf_storage_class }}"
+          volumeMode: Block
+        status: {}
+      name: "ocs-deviceset-{{ fdf_storage_class }}"
+      placement: {}
+      preparePlacement: {}
+      replica: 1
+      resources: {}
+  encryption:
+    keyRotation:
+      schedule: '@weekly'
+    kms: {}
+  monDataDirHostPath: /var/lib/rook
+  managedResources:
+    cephObjectStoreUsers: {}
+    cephCluster: {}
+    cephBlockPools:
+      defaultStorageClass: true
+    cephNonResilientPools: {}
+    cephObjectStores: {}
+    cephFilesystems: {}
+    cephRBDMirror: {}
+    cephToolbox: {}
+    cephDashboard: {}
+    cephConfig: {}
+  arbiter: {}
+  network:
+    connections:
+      encryption: {}
+    multiClusterService: {}
+  nodeTopologies: {}
+  externalStorage: {}
+  resourceProfile: lean
+  flexibleScaling: true

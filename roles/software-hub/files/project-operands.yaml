@@ -1,0 +1,7 @@
+apiVersion: project.openshift.io/v1
+kind: Project
+metadata:
+  name: "{{ cpd_instance_ns }}"
+  annotations:
+    openshift.io/display-name: "Software Hub Operands - Instance 1"
+    openshift.io/description: "Project for Software Hub operands for instance 1"

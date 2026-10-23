@@ -1,0 +1,70 @@
+apiVersion: wxa4z.watsonx.ibm.com/v1
+kind: ZAssistantDeploy
+metadata:
+  name: zassistantdeploy
+  namespace: wxa4z-zad
+spec:
+  license: true
+
+  global:
+    clusterDomain: "{{ cluster_domain }}"
+
+  providerId: "provider"
+  cpdNamespace: "{{ cpd_instance_ns }}"
+
+  opensearch:
+    secretName: opensearch-creds
+    persistence:
+      enabled: true
+      storageClass: "ocs-storagecluster-cephfs"
+      accessModes:
+        - ReadWriteOnce
+      size: 24Gi
+
+  wrapper:
+    secretName: wrapper-creds
+    createRoute: true
+
+  clientIngestion:
+    enabled: true
+    tenant:
+      id: "provider"
+      isProvider: "True"
+    ingestionCredentials:
+      secretName: "wxa4z-ingestion-credentials"
+    createRoute: true
+    env:
+      AUTH_SERVICE_URL: "http://wxa4z-authorization-service.wxa4z-zad.svc.cluster.local:8080"
+      translation_concurrency: 1
+
+  authorization:
+    secrets:
+      createSecret: false
+    env:
+      PORT: ":8080"
+      FILE_STORAGE_PATH: "/app/data"
+      AGENTS: |-
+        [
+          {"id":"wxa4z:cics:agent","name":"cics","secret":"{{ cics_agent_token | b64encode }}"},
+          {"id":"wxa4z:db2:agent","name":"db2","secret":"{{ db2_agent_token | b64encode }}"},
+          {"id":"wxa4z:ims:agent","name":"ims","secret":"{{ ims_agent_token | b64encode }}"},
+          {"id":"wxa4z:platform:agent","name":"platform","secret":"{{ platform_agent_secret | b64encode }}"}
+        ]
+      ALLOW_DOMAINS: '["ibm.com", "us.ibm.com"]'
+      CPD_HOST: "cpd-{{ cpd_instance_ns }}.{{ cluster_domain }}"
+
+  bootstrapper:
+    enabled: true
+    config:
+      logLevel: "INFO"
+      namespacePrefix: "wxa4z-"
+      createNamespace: true
+      opensearchUrl: "https://wxa4z-opensearch-cluster.wxa4z-zad.svc.cluster.local:9200"
+      osCaCertSecret: "wxa4z-opensearch-tls-secret"
+      wrapperTlsSecret: "wxa4z-opensearch-wrapper-tls-secret"
+      contentIngestionEnabled: "false"
+    secrets:
+      opensearchUsername: "{{ opensearch_username }}"
+      opensearchPassword: "{{ opensearch_client_password }}"
+      wrapperAuthUser: "{{ opensearch_wrapper_username }}"
+      wrapperAuthPassword: "{{ opensearch_wrapper_password }}"

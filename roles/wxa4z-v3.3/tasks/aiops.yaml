@@ -1,0 +1,113 @@
+---
+- name: Run install steps for wxa4z-v3.3 AIOps
+  tags:
+    - install
+    - aiops
+  block:
+
+    - name: Create wxa4z-aiops namespace
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ role_path }}/files/aiops/namespace.yaml"
+
+    - name: Wait for namespace to become active
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: wxa4z-aiops
+      register: ns_status
+      until: ns_status.resources[0].status.phase == "Active"
+      retries: 20
+      delay: 5
+
+    - name: Get OpenShift ingress domain
+      kubernetes.core.k8s_info:
+        api_version: operator.openshift.io/v1
+        kind: IngressController
+        name: default
+        namespace: openshift-ingress-operator
+      register: ingress_info
+
+    - name: Set cluster_domain fact
+      set_fact:
+        cluster_domain: "{{ ingress_info.resources[0].status.domain }}"
+      when: ingress_info.resources | length > 0
+
+    - name: Create AIOpsIntegration CR
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/templates/aiops/aiops-crd.yaml.j2') }}"
+        
+    - name: Wait for AIOpsIntegration CR to be created
+      kubernetes.core.k8s_info:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AIOpsIntegration
+        name: wxa4z-aiops
+        namespace: wxa4z-aiops
+      register: aiops_check
+      retries: 20
+      delay: 10
+      until: aiops_check.resources | length > 0
+
+    - name: Wait for AIOpsIntegration to be deployed
+      kubernetes.core.k8s_info:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: AIOpsIntegration
+        name: wxa4z-aiops
+        namespace: wxa4z-aiops
+      register: aiops_status
+      until: >
+        aiops_status.resources | length > 0 and
+        aiops_status.resources[0].status is defined and
+        aiops_status.resources[0].status.conditions is defined and
+        (
+          aiops_status.resources[0].status.conditions
+          | selectattr('type', 'equalto', 'Deployed')
+          | selectattr('status', 'equalto', 'True')
+          | list
+          | length
+        ) > 0
+      retries: 60
+      delay: 10
+      failed_when: false
+      
+    - name: Display AIOpsIntegration status if deployment didn't complete
+      debug:
+        msg: |
+          AIOpsIntegration deployment did not complete within the timeout period.
+          Current status: {{ aiops_status.resources[0].status | default('No status available') }}
+          This is not a fatal error - the deployment may still be in progress.
+          Check the status with: oc get aiopsintegration wxa4z-aiops -n wxa4z-aiops -o yaml
+      when: >
+        aiops_status.resources | length == 0 or
+        aiops_status.resources[0].status is not defined or
+        (
+          aiops_status.resources[0].status.conditions | default([])
+          | selectattr('type', 'equalto', 'Deployed')
+          | selectattr('status', 'equalto', 'True')
+          | list
+          | length
+        ) == 0
+
+    - name: Wait until specific pods are Running
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: wxa4z-aiops
+      register: pod_status
+      retries: 30
+      delay: 10
+      until: >
+        (
+          pod_status.resources |
+          selectattr('metadata.name', 'search', 'zchatops-deployment') |
+          selectattr('status.phase', 'equalto', 'Running') |
+          list | length
+        ) >= 1 and
+        (
+          pod_status.resources |
+          selectattr('metadata.name', 'search', 'zchatops-mcp-server') |
+          selectattr('status.phase', 'equalto', 'Running') |
+          list | length
+        ) >= 1
+      failed_when: false

@@ -1,0 +1,172 @@
+---
+# list-wxo-tenants role
+# Fetches all WxO tenants from the CPD deployment, activates each tenant's ADK
+# environment to detect the currently configured default MGW model, and prints
+# a summary table:
+#
+#   TENANT NAME               TENANT ID               DEFAULT MGW MODEL
+#   wo-prod                   1653802146084           virtual-model/openai/ibm/granite-4.1-8b-instruct
+#   wo-dev                    1653802146085           (none)
+#
+# Also populates `discovered_tenants` for downstream roles (e.g. configure-model-gateway).
+#
+# Tags: list-wxo-tenants
+
+- name: List WxO tenants and detect MGW model state
+  tags: list-wxo-tenants
+  block:
+
+    # ==========================================================================
+    # PREREQUISITES CHECK
+    # ==========================================================================
+
+    - name: Check if orchestrate CLI is installed
+      ansible.builtin.command: which orchestrate
+      register: _lwt_orchestrate_check
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if orchestrate CLI is not installed
+      ansible.builtin.fail:
+        msg: |
+          ============================================================
+          orchestrate CLI is not installed or not in PATH.
+
+          Please install it by following the instructions at:
+          https://developer.watson-orchestrate.ibm.com/getting_started/installing
+          ============================================================
+      when: _lwt_orchestrate_check.rc != 0
+
+    # ==========================================================================
+    # GET CPD CREDENTIALS AND URL
+    # ==========================================================================
+
+    - name: Get CPD admin credentials from secret
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: ibm-iam-bindinfo-platform-auth-idp-credentials
+        namespace: "{{ cpd_instance_ns }}"
+      register: _lwt_cpd_secret
+      when: admin_password is not defined
+
+    - name: Extract CPD admin password
+      ansible.builtin.set_fact:
+        cpd_password: "{{ admin_password if admin_password is defined else (_lwt_cpd_secret.resources[0].data.admin_password | b64decode) }}"
+
+    - name: Get CPD Route
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Route
+        name: cpd
+        namespace: "{{ cpd_instance_ns }}"
+      register: _lwt_cpd_route
+      when: cpd_url is not defined
+
+    - name: Set CPD host URL and bare hostname
+      ansible.builtin.set_fact:
+        cpd_host_url: "{{ 'https://' + cpd_url if cpd_url is defined else 'https://' + _lwt_cpd_route.resources[0].spec.host }}"
+        cpd_url: "{{ cpd_url if cpd_url is defined else _lwt_cpd_route.resources[0].spec.host }}"
+
+    - name: Derive CPD slug for ADK environment naming
+      ansible.builtin.set_fact:
+        cpd_slug: "{{ cpd_url | regex_replace('^cpd-', '') | regex_replace('\\..*$', '') }}"
+
+    # ==========================================================================
+    # GENERATE CPD AUTH TOKEN
+    # ==========================================================================
+
+    - name: Generate CPD auth token
+      ansible.builtin.uri:
+        url: "https://{{ cpd_url }}/icp4d-api/v1/authorize"
+        method: POST
+        body_format: json
+        body:
+          username: "cpadmin"
+          password: "{{ cpd_password }}"
+        headers:
+          cache-control: "no-cache"
+        validate_certs: false
+        status_code: 200
+      register: _lwt_auth_response
+      changed_when: false
+      no_log: true
+
+    - name: Extract CPD auth token
+      ansible.builtin.set_fact:
+        auth_token: "{{ _lwt_auth_response.json.token }}"
+      no_log: true
+
+    # ==========================================================================
+    # FETCH ALL TENANTS
+    # ==========================================================================
+
+    - name: Fetch all WxO tenants from CPD API
+      ansible.builtin.uri:
+        url: "https://{{ cpd_url }}/zen-data/v3/service_instances?addon_type=orchestrate"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ auth_token }}"
+          Accept: "application/json"
+        validate_certs: false
+        status_code: 200
+      register: _lwt_tenants_response
+      changed_when: false
+      no_log: true
+
+    - name: Parse tenant list
+      ansible.builtin.set_fact:
+        all_wxo_tenants: "{{ _lwt_tenants_response.json.service_instances | default([]) }}"
+
+    - name: Fail if no tenants found
+      ansible.builtin.fail:
+        msg: |
+          ============================================================
+          ERROR: No WxO tenants found on this CPD deployment.
+          Check that watsonx Orchestrate is installed and instances
+          have been created (run the create-wxo-instance role first).
+          ============================================================
+      when: all_wxo_tenants | length == 0
+
+    # ==========================================================================
+    # DETECT DEFAULT MODEL PER TENANT
+    # Activates each tenant's ADK environment and lists virtual models.
+    # Populates `discovered_tenants` list of objects:
+    #   { name, id, namespace, env_name, service_instance_url, current_model,
+    #     detection_failed }
+    # ==========================================================================
+
+    - name: Initialise discovered_tenants list
+      ansible.builtin.set_fact:
+        discovered_tenants: []
+
+    - name: Detect current default model for each tenant
+      ansible.builtin.include_tasks:
+        file: detect-tenant-model.yaml
+        apply:
+          tags: list-wxo-tenants
+      tags: list-wxo-tenants
+      loop: "{{ all_wxo_tenants }}"
+      loop_control:
+        loop_var: discovery_tenant
+        label: "{{ discovery_tenant.display_name }}"
+
+    # ==========================================================================
+    # PRINT SUMMARY TABLE
+    # Delegates to files/print-tenant-table.sh for formatting.
+    # Called via `bash` so no execute bit is required on the script file.
+    # ==========================================================================
+
+    - name: Display WxO tenant table
+      ansible.builtin.command:
+        argv:
+          - bash
+          - "{{ role_path }}/files/print-tenant-table.sh"
+          - "{{ cpd_url }}"
+          - "{{ discovered_tenants | to_json }}"
+      register: _lwt_table
+      changed_when: false
+
+    - name: Print WxO tenant table
+      ansible.builtin.debug:
+        msg: "{{ _lwt_table.stdout_lines }}"

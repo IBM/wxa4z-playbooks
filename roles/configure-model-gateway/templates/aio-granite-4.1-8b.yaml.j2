@@ -1,0 +1,15 @@
+spec_version: v1
+kind: model
+name: openai/ibm/granite-4.1-8b
+display_name: aioptimizer-granite-4.1-8b
+description: |-
+    ibm/granite-4.1-8b provided by AIOptimizer.
+tags:
+ - ibm
+ - openai
+ - default
+model_type: chat
+provider_config:
+    custom_host: https://{{ aio_cluster_ip }}/api/com.ibm.aioinference/v1
+config:
+    stop: ["PAUSE"]

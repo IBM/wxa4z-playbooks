@@ -1,0 +1,19 @@
+---
+# WatsonX Orchestrate Instance Creation Role Default Variables
+
+# Force regeneration of API key (set to true to create new API key even if secret exists)
+wxo_regenerate_api_key: false
+
+# List of WxO instances to create
+# Each instance should have: name, description (optional)
+# Example:
+# wxo_instances:
+#   - name: "wo-instance-1"
+#     description: "Production instance"
+#   - name: "wo-instance-2"
+#     description: "Development instance"
+wxo_instances:
+  - name: "wo-instance-1"
+    description: "Created by Ansible"
+  - name: "wo-instance-2"
+    description: "Created by Ansible"

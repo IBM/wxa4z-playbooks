@@ -1,0 +1,159 @@
+---
+# Main task file for wxa4z-v3.3 role
+# This role deploys IBM watsonx Assistant for Z v3.3 with enhanced features:
+# - Multi-tenancy support (cluster-scoped operator)
+# - NATS credentials management
+# - Enhanced secrets and authorization
+# - Bootstrapper and ingestion manager
+# - AIOps integration
+#
+# Usage:
+#   Install all components:      --tags install
+#   Install specific component:  --tags operator | --tags zad | --tags aiops
+#   Uninstall all:               --tags uninstall
+
+- name: Validate required variables for wxa4z-v3.3 zad and install paths
+  tags:
+    - install
+    - zad
+  ansible.builtin.assert:
+    that:
+      - model_runtime is defined
+      - model_runtime in ['openai_protocol', 'on-prem', 'cloud']
+      - model_runtime != 'openai_protocol' or ((aio_cluster_ip | default('') | length > 0 and aio_api_key | default('') | length > 0) or (rhaiis_inferencing_endpoint | default('') | length > 0 and rhaiis_api_key | default('') | length > 0))
+      - model_runtime not in ['on-prem', 'cloud'] or (watsonx_url | default('') | length > 0 and watsonx_api_key | default('') | length > 0 and watsonx_model_id | default('') | length > 0 and watsonx_space_id | default('') | length > 0)
+      - opensearch_username is defined and opensearch_username | length > 0
+      - opensearch_client_password is defined and opensearch_client_password | length > 0
+      - opensearch_wrapper_username is defined and opensearch_wrapper_username | length > 0
+      - opensearch_wrapper_password is defined and opensearch_wrapper_password | length > 0
+      - sts_secret is defined and sts_secret | length > 0
+      - p12_password is defined and p12_password | length > 0
+      - jwt_signing_key is defined and jwt_signing_key | length > 0
+      - platform_agent_secret is defined and platform_agent_secret | length > 0
+    fail_msg: |
+      The following variables are required by the wxa4z-v3.3 role for the zad/install path but are missing or invalid.
+      Please configure them in vars/global.yaml:
+
+        model_runtime               - Must be one of: openai_protocol, on-prem, cloud
+                                      Current: {{ model_runtime | default('NOT SET') }}
+
+        For openai_protocol:
+          aio_cluster_ip            - AI Optimizer hostname or IP, or leave empty and set RHAIIS values instead
+                                      Current: {{ aio_cluster_ip | default('NOT SET') }}
+          aio_api_key               - AI Optimizer API key, or leave empty and set RHAIIS values instead
+                                      Current: {{ aio_api_key | default('NOT SET') }}
+          rhaiis_inferencing_endpoint - RHAIIS endpoint URL as an alternative to AIO
+                                        Current: {{ rhaiis_inferencing_endpoint | default('NOT SET') }}
+          rhaiis_api_key            - RHAIIS API key as an alternative to AIO
+                                        Current: {{ rhaiis_api_key | default('NOT SET') }}
+
+        For on-prem or cloud:
+          watsonx_url               - WatsonX endpoint URL
+                                      Current: {{ watsonx_url | default('NOT SET') }}
+          watsonx_api_key           - WatsonX API key
+                                      Current: {{ watsonx_api_key | default('NOT SET') }}
+          watsonx_model_id          - WatsonX model identifier
+                                      Current: {{ watsonx_model_id | default('NOT SET') }}
+          watsonx_space_id          - WatsonX deployment space ID
+                                      Current: {{ watsonx_space_id | default('NOT SET') }}
+
+        OpenSearch credentials:
+          opensearch_username       - OpenSearch admin username
+                                      Current: {{ opensearch_username | default('NOT SET') }}
+          opensearch_client_password - OpenSearch client password
+                                       Current: {{ opensearch_client_password | default('NOT SET') }}
+          opensearch_wrapper_username - OpenSearch wrapper service username
+                                        Current: {{ opensearch_wrapper_username | default('NOT SET') }}
+          opensearch_wrapper_password - OpenSearch wrapper service password
+                                        Current: {{ opensearch_wrapper_password | default('NOT SET') }}
+
+        Authorization service secrets:
+          sts_secret                - STS token
+                                      Current: {{ sts_secret | default('NOT SET') }}
+          p12_password              - P12 password
+                                      Current: {{ p12_password | default('NOT SET') }}
+          jwt_signing_key           - JWT signing key
+                                      Current: {{ jwt_signing_key | default('NOT SET') }}
+          platform_agent_secret     - Platform agent secret
+                                      Current: {{ platform_agent_secret | default('NOT SET') }}
+
+        Note: Agent tokens (cics_agent_token, db2_agent_token, ims_agent_token, intellimagic_agent_token,
+              omegamon_agent_token, support_agent_token, upgrade_agent_token) are optional and should
+              only be provided for agents relevant to your deployment.
+    success_msg: "wxa4z-v3.3 zad/install variable validation passed"
+
+- name: Validate required variables for wxa4z-v3.3 aiops and install paths
+  tags:
+    - install
+    - aiops
+  ansible.builtin.assert:
+    that:
+      - smu_hostname is defined and smu_hostname | length > 0
+      - smu_username is defined and smu_username | length > 0
+      - smu_password is defined and smu_password | length > 0
+      - smu_admin_username is defined and smu_admin_username | length > 0
+      - smu_admin_password is defined and smu_admin_password | length > 0
+      - zws_hostname is defined and zws_hostname | length > 0
+      - zws_username is defined and zws_username | length > 0
+      - zws_password is defined and zws_password | length > 0
+      - aiops_username is defined and aiops_username | length > 0
+      - aiops_password is defined and aiops_password | length > 0
+    fail_msg: |
+      The following variables are required by the wxa4z-v3.3 role for the aiops/install path but are missing or invalid.
+      Please configure them in vars/global.yaml:
+
+        smu_hostname                - SMU hostname
+                                      Current: {{ smu_hostname | default('NOT SET') }}
+        smu_username                - SMU username
+                                      Current: {{ smu_username | default('NOT SET') }}
+        smu_password                - SMU password
+                                      Current: {{ smu_password | default('NOT SET') }}
+        smu_admin_username          - SMU admin username
+                                      Current: {{ smu_admin_username | default('NOT SET') }}
+        smu_admin_password          - SMU admin password
+                                      Current: {{ smu_admin_password | default('NOT SET') }}
+        zws_hostname                - ZWS hostname
+                                      Current: {{ zws_hostname | default('NOT SET') }}
+        zws_username                - ZWS username
+                                      Current: {{ zws_username | default('NOT SET') }}
+        zws_password                - ZWS password
+                                      Current: {{ zws_password | default('NOT SET') }}
+        aiops_username              - AIOps username
+                                      Current: {{ aiops_username | default('NOT SET') }}
+        aiops_password              - AIOps password
+                                      Current: {{ aiops_password | default('NOT SET') }}
+    success_msg: "wxa4z-v3.3 aiops/install variable validation passed"
+
+- name: Execute wxa4z-v3.3-operator tasks
+  ansible.builtin.include_tasks: operator.yaml
+  when: >
+    ('install' in ansible_run_tags or
+    'operator' in ansible_run_tags) and
+    'uninstall' not in ansible_run_tags
+  tags:
+    - always
+
+- name: Execute wxa4z-v3.3-zassistant-deploy tasks
+  ansible.builtin.include_tasks: zassistant-deploy.yaml
+  when: >
+    ('install' in ansible_run_tags or
+    'zad' in ansible_run_tags) and
+    'uninstall' not in ansible_run_tags
+  tags:
+    - always
+
+- name: Execute wxa4z-v3.3-aiops tasks
+  ansible.builtin.include_tasks: aiops.yaml
+  when: >
+    ('install' in ansible_run_tags or
+    'aiops' in ansible_run_tags) and
+    'uninstall' not in ansible_run_tags
+  tags:
+    - always
+
+- name: Execute wxa4z-v3.3 uninstall tasks
+  ansible.builtin.include_tasks: uninstall.yaml
+  when: >
+    'uninstall' in ansible_run_tags
+  tags:
+    - uninstall

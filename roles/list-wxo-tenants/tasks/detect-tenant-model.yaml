@@ -1,0 +1,50 @@
+---
+# =============================================================================
+# DETECT TENANT MODEL
+# Called once per tenant during the discovery phase.
+# Delegates to files/detect-tenant-model.sh which handles env add, env activate,
+# and model detection in one shot, emitting a JSON object with the result.
+# Appends the result to `discovered_tenants`.
+#
+# Loop variable: discovery_tenant  (id, display_name, namespace)
+# Tags are applied by the calling include_tasks via `apply:`.
+# =============================================================================
+
+- name: "Detect model for tenant '{{ discovery_tenant.display_name }}'"
+  ansible.builtin.command:
+    argv:
+      - bash
+      - "{{ playbook_dir }}/roles/list-wxo-tenants/files/detect-tenant-model.sh"
+      - "wxo-env-{{ cpd_slug }}-{{ discovery_tenant.display_name | lower | regex_replace('[^a-z0-9]+', '-') | regex_replace('^-+|-+$', '') }}"
+      - "{{ cpd_host_url }}/orchestrate/{{ discovery_tenant.namespace }}/instances/{{ discovery_tenant.id }}"
+      - "cpadmin"
+      - "{{ cpd_password }}"
+      - "{{ discovery_tenant | to_json }}"
+  register: _disc_result
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: "Append tenant '{{ discovery_tenant.display_name }}' to discovered_tenants"
+  ansible.builtin.set_fact:
+    discovered_tenants: >-
+      {{
+        discovered_tenants + [
+          _disc_result.stdout | from_json
+          if _disc_result.stdout | trim | length > 0
+          else {
+            'name':      discovery_tenant.display_name,
+            'id':        discovery_tenant.id | string,
+            'namespace': discovery_tenant.namespace,
+            'env_name':  'wxo-env-' + cpd_slug + '-' + (
+                           discovery_tenant.display_name | lower
+                           | regex_replace('[^a-z0-9]+', '-')
+                           | regex_replace('^-+|-+$', '')),
+            'service_instance_url': cpd_host_url + '/orchestrate/'
+                                    + discovery_tenant.namespace + '/instances/'
+                                    + (discovery_tenant.id | string),
+            'current_model':    none,
+            'detection_failed': true
+          }
+        ]
+      }}

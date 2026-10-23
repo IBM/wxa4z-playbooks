@@ -1,0 +1,67 @@
+---
+# Process a single WxO instance
+
+- name: "Check if instance '{{ wxo_instance.name }}' already exists"
+  ansible.builtin.set_fact:
+    existing_instance: "{{ existing_wxo_instances | selectattr('display_name', 'equalto', wxo_instance.name) | list | first | default(none) }}"
+
+- name: "Create WxO Instance '{{ wxo_instance.name }}' (if not exists)"
+  ansible.builtin.command: >
+    curl -L 'https://{{ cpd_url }}/zen-data/v3/service_instances' \
+    --insecure \
+    -H 'Accept: application/json' \
+    -H 'Content-Type: application/json' \
+    -H 'Authorization: Bearer {{ auth_token }}' \
+    --data-raw '{
+        "addon_type": "orchestrate",
+        "addon_version": "{{ cpd_version }}",
+        "create_arguments": {
+            "description": "{{ wxo_instance.description | default('Created by Ansible') }}"
+        },
+        "namespace": "{{ cpd_instance_ns }}",
+        "display_name": "{{ wxo_instance.name }}"
+    }'
+  register: instance_creation
+  until: (instance_creation.stdout | from_json).id is defined
+  retries: 10
+  delay: 30
+  when: existing_instance is none
+  no_log: true
+
+- name: "Reset instance details for '{{ wxo_instance.name }}'"
+  ansible.builtin.set_fact:
+    current_instance_details: {}
+
+- name: "Set instance details from creation for '{{ wxo_instance.name }}'"
+  ansible.builtin.set_fact:
+    current_instance_details: "{{ instance_creation.stdout | from_json }}"
+  when: existing_instance is none and instance_creation is not skipped
+  no_log: true
+
+- name: "Set instance details from existing instance for '{{ wxo_instance.name }}'"
+  ansible.builtin.set_fact:
+    current_instance_details: "{{ existing_instance }}"
+  when: existing_instance is not none
+
+- name: "Fail if tenant ID is missing for '{{ wxo_instance.name }}'"
+  ansible.builtin.fail:
+    msg: >-
+      Could not determine tenant ID for instance '{{ wxo_instance.name }}'.
+      CPD API response did not contain an 'id' field.
+      Check that the instance was created successfully and that display_name
+      matches exactly (case-sensitive): '{{ wxo_instance.name }}'.
+      current_instance_details: {{ current_instance_details }}
+  when: current_instance_details.id is not defined or current_instance_details.id == ''
+
+- name: "Add tenant ID to mapping for '{{ wxo_instance.name }}'"
+  ansible.builtin.set_fact:
+    wxo_tenant_ids: "{{ wxo_tenant_ids | combine({wxo_instance.name: current_instance_details.id}) }}"
+  when: current_instance_details.id is defined and current_instance_details.id != ''
+
+- name: "Display status for '{{ wxo_instance.name }}'"
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Created' if existing_instance is none else 'Found existing' }}
+      WxO instance '{{ wxo_instance.name }}'
+      with tenant ID: {{ current_instance_details.id }}
+  when: current_instance_details.id is defined and current_instance_details.id != ''

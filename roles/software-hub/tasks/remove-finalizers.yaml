@@ -1,0 +1,93 @@
+---
+# Remove finalizers from resources in cpd-instance-1 namespace
+
+- name: Remove finalizers from authentications.operator.ibm.com in cpd-instance-1
+  ansible.builtin.shell: |
+    oc get authentications.operator.ibm.com -n cpd-instance-1 -o name | xargs -r -I {} oc patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge -n cpd-instance-1
+  ignore_errors: true
+  changed_when: false
+
+- name: Remove finalizers from ccs.ccs.cpd.ibm.com in cpd-instance-1
+  ansible.builtin.shell: |
+    oc get ccs.ccs.cpd.ibm.com -n cpd-instance-1 -o name | xargs -r -I {} oc patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge -n cpd-instance-1
+  ignore_errors: true
+  changed_when: false
+
+- name: Remove finalizers from clients.oidc.security.ibm.com in cpd-instance-1
+  ansible.builtin.shell: |
+    oc get clients.oidc.security.ibm.com -n cpd-instance-1 -o name | xargs -r -I {} oc patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge -n cpd-instance-1
+  ignore_errors: true
+  changed_when: false
+
+- name: Check if zenclient-{{ cpd_instance_ns }} exists
+  ansible.builtin.command: >
+    oc get client.oidc.security.ibm.com zenclient-{{ cpd_instance_ns }}
+    -n {{ cpd_instance_ns }}
+  register: zenclient_check
+  ignore_errors: true
+  changed_when: false
+
+- name: Remove finalizers from zenclient-cpd-instance-1 client.oidc.security.ibm.com
+  ansible.builtin.command: >
+    oc patch client.oidc.security.ibm.com zenclient-{{ cpd_instance_ns }}
+    -n {{ cpd_instance_ns }}
+    --type=merge
+    -p '{"metadata":{"finalizers":null}}'
+  when: zenclient_check.rc == 0
+  changed_when: false
+
+- name: Remove finalizers from kafkatopics.ibmevents.ibm.com in cpd-instance-1
+  ansible.builtin.shell: |
+    oc get kafkatopics.ibmevents.ibm.com -n cpd-instance-1 -o name | xargs -r -I {} oc patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge -n cpd-instance-1
+  ignore_errors: true
+  changed_when: false
+
+- name: Remove finalizers from operandbindinfos.operator.ibm.com in cpd-instance-1
+  ansible.builtin.shell: |
+    oc get operandbindinfos.operator.ibm.com -n cpd-instance-1 -o name | xargs -r -I {} oc patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge -n cpd-instance-1
+  ignore_errors: true
+  changed_when: false
+
+- name: Remove finalizers from operandrequests.operator.ibm.com in cpd-instance-1
+  ansible.builtin.shell: |
+    oc get operandrequests.operator.ibm.com -n cpd-instance-1 -o name | xargs -r -I {} oc patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge -n cpd-instance-1
+  ignore_errors: true
+  changed_when: false
+
+- name: Remove finalizers from rabbitmqclusters.rabbitmq.opencontent.ibm.com in cpd-instance-1
+  ansible.builtin.shell: |
+    oc get rabbitmqclusters.rabbitmq.opencontent.ibm.com -n cpd-instance-1 -o name | xargs -r -I {} oc patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge -n cpd-instance-1
+  ignore_errors: true
+  changed_when: false
+
+- name: Remove finalizers from watsonxaiifm.watsonxaiifm.cpd.ibm.com in cpd-instance-1
+  ansible.builtin.shell: |
+    oc get watsonxaiifm.watsonxaiifm.cpd.ibm.com -n cpd-instance-1 -o name | xargs -r -I {} oc patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge -n cpd-instance-1
+  ignore_errors: true
+  changed_when: false
+
+- name: Remove finalizers from zenextensions.zen.cpd.ibm.com in cpd-instance-1
+  ansible.builtin.shell: |
+    oc get zenextensions.zen.cpd.ibm.com -n cpd-instance-1 -o name | xargs -r -I {} oc patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge -n cpd-instance-1
+  ignore_errors: true
+  changed_when: false
+
+- name: Remove wo.watsonx.ibm.com/retain-pvcs finalizer from PostgreSQL clusters in cpd-instance-1
+  ansible.builtin.shell: |
+    oc get clusters.postgresql.k8s.enterprisedb.io -n {{ cpd_instance_ns }} -o name | xargs -r -I {} oc patch {} -n {{ cpd_instance_ns }} --type=merge -p '{"metadata":{"finalizers":[]}}'
+  ignore_errors: true
+  changed_when: false
+
+# Remove finalizers from resources in cpd-operators namespace
+
+- name: Remove finalizers from namespacescopes.operator.ibm.com in cpd-operators
+  ansible.builtin.shell: |
+    oc get namespacescopes.operator.ibm.com -n cpd-operators -o name | xargs -r -I {} oc patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge -n cpd-operators
+  ignore_errors: true
+  changed_when: false
+
+- name: Remove finalizers from operandrequests.operator.ibm.com in cpd-operators
+  ansible.builtin.shell: |
+    oc get operandrequests.operator.ibm.com -n cpd-operators -o name | xargs -r -I {} oc patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge -n cpd-operators
+  ignore_errors: true
+  changed_when: false

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wxa4z-aiops
+  labels:
+    app.kubernetes.io/name: wxa4z-aiops
+    app.kubernetes.io/managed-by: ansible
+
+

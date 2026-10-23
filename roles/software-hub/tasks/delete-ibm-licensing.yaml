@@ -1,0 +1,66 @@
+---
+# Remove finalizers from any ibm-licensing CRs that would block namespace
+# deletion, then delete the namespace itself.
+
+- name: Remove finalizers from IBMLicensing CRs in ibm-licensing
+  ansible.builtin.shell: |
+    oc get ibmlicensings.operator.ibm.com -n {{ licensing_ns }} -o name 2>/dev/null \
+      | xargs -r -I {} oc patch {} -n {{ licensing_ns }} \
+          --type=merge -p '{"metadata":{"finalizers":[]}}'
+  ignore_errors: true
+  changed_when: false
+
+- name: Remove finalizers from IBMLicensingDefinition CRs in ibm-licensing
+  ansible.builtin.shell: |
+    oc get ibmlicensingdefinitions.operator.ibm.com -n {{ licensing_ns }} -o name 2>/dev/null \
+      | xargs -r -I {} oc patch {} -n {{ licensing_ns }} \
+          --type=merge -p '{"metadata":{"finalizers":[]}}'
+  ignore_errors: true
+  changed_when: false
+
+- name: Remove finalizers from IBMLicensingQuerySource CRs in ibm-licensing
+  ansible.builtin.shell: |
+    oc get ibmlicensingquerysources.operator.ibm.com -n {{ licensing_ns }} -o name 2>/dev/null \
+      | xargs -r -I {} oc patch {} -n {{ licensing_ns }} \
+          --type=merge -p '{"metadata":{"finalizers":[]}}'
+  ignore_errors: true
+  changed_when: false
+
+- name: Remove finalizers from IBMLicensingMetadata CRs in ibm-licensing
+  ansible.builtin.shell: |
+    oc get ibmlicensingmetadatas.operator.ibm.com -n {{ licensing_ns }} -o name 2>/dev/null \
+      | xargs -r -I {} oc patch {} -n {{ licensing_ns }} \
+          --type=merge -p '{"metadata":{"finalizers":[]}}'
+  ignore_errors: true
+  changed_when: false
+
+- name: Delete ibm-licensing namespace
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Namespace
+    name: "{{ licensing_ns }}"
+  ignore_errors: true
+
+# OLM places its own finalizers on Subscription/CSV objects inside the
+# namespace. If those controllers are already gone, nothing processes the
+# finalizers and the namespace hangs in Terminating. Patch it away immediately
+# after issuing the delete rather than waiting for OLM to self-resolve.
+- name: Force-remove finalizers from ibm-licensing namespace if Terminating
+  ansible.builtin.shell: |
+    oc get namespace {{ licensing_ns }} --no-headers 2>/dev/null | grep -q Terminating \
+      && oc patch namespace {{ licensing_ns }} \
+           --type=merge -p '{"metadata":{"finalizers":[]}}' \
+      || true
+  ignore_errors: true
+  changed_when: false
+
+- name: Wait for ibm-licensing namespace to be fully removed
+  ansible.builtin.shell: |
+    oc get namespace {{ licensing_ns }} --no-headers 2>/dev/null | wc -l
+  register: licensing_ns_status
+  until: licensing_ns_status.stdout | int == 0
+  retries: 36
+  delay: 10
+  ignore_errors: true
+  changed_when: false

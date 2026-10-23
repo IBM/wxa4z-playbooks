@@ -1,0 +1,7 @@
+apiVersion: project.openshift.io/v1
+kind: Project
+metadata:
+  name: ibm-licensing
+  annotations:
+    openshift.io/display-name: "IBM Licensing Project"
+    openshift.io/description: "Project for ibm-licensing"

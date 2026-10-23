@@ -1,0 +1,8 @@
+# Tasks in this file are from documentation provided here:
+# https://www.ibm.com/docs/en/software-hub/5.3.x?topic=arppn-applying-required-permissions-by-running-authorize-instance-topology-command
+- name: Run the cpd-cli manage authorize-instance-topology command
+  ansible.builtin.command: >
+    cpd-cli manage authorize-instance-topology
+    --cpd_operator_ns={{ cpd_operators_ns }}
+    --cpd_instance_ns={{ cpd_instance_ns }}
+  changed_when: false

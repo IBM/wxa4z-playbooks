@@ -1,0 +1,110 @@
+---
+- name: Run steps for installing the cert-manager Operator
+  tags: install
+  block:
+
+    - name: Create cert-manager namespace
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/files/namespace.yaml') | from_yaml }}"
+
+    - name: Create cert-manager operator group
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/files/operator-group.yaml') | from_yaml }}"
+
+    - name: Create cert-manager subscription
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/files/subscription.yaml') | from_yaml }}"
+
+    - name: Wait for cert-manager CSV to succeed
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ cert_manager_namespace }}"
+      register: csv_result
+      retries: "{{ cert_manager_csv_wait_retries }}"
+      delay: "{{ cert_manager_csv_wait_delay }}"
+      until: >
+        csv_result.resources |
+        selectattr('status.phase','equalto','Succeeded') |
+        list | length > 0
+
+  rescue:
+    - name: Display cert-manager installation error
+      ansible.builtin.debug:
+        msg: |
+          Failed to install cert-manager operator.
+          Namespace: {{ cert_manager_namespace }}
+          Channel: {{ cert_manager_channel }}
+          Please check the operator logs for more details.
+
+    - name: Get CSV status for debugging
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ cert_manager_namespace }}"
+      register: csv_debug
+      ignore_errors: true
+
+    - name: Display CSV status
+      ansible.builtin.debug:
+        var: csv_debug.resources
+      when: csv_debug.resources is defined
+
+    - name: Fail the playbook
+      ansible.builtin.fail:
+        msg: "Cert-manager operator installation failed. Check the logs above for details."
+
+- name: Run steps for uninstalling the cert-manager Operator
+  tags: uninstall
+  block:
+
+    - name: Delete cert-manager subscription
+      kubernetes.core.k8s:
+        state: absent
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: "{{ cert_manager_subscription_name }}"
+        namespace: "{{ cert_manager_namespace }}"
+
+    - name: Wait for subscription deletion
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Delete cert-manager CSV
+      kubernetes.core.k8s:
+        state: absent
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ cert_manager_namespace }}"
+        label_selectors:
+          - "operators.coreos.com/openshift-cert-manager-operator.{{ cert_manager_namespace }}"
+
+    - name: Delete cert-manager operator group
+      kubernetes.core.k8s:
+        state: absent
+        api_version: operators.coreos.com/v1
+        kind: OperatorGroup
+        name: "{{ cert_manager_namespace }}"
+        namespace: "{{ cert_manager_namespace }}"
+
+    - name: Delete cert-manager namespace
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Namespace
+        name: "{{ cert_manager_namespace }}"
+
+  rescue:
+    - name: Display cert-manager uninstallation error
+      ansible.builtin.debug:
+        msg: |
+          Failed to uninstall cert-manager operator.
+          Some resources may still exist in namespace: {{ cert_manager_namespace }}
+          Please check manually and clean up if needed.
+
+    - name: Fail the playbook
+      ansible.builtin.fail:
+        msg: "Cert-manager operator uninstallation failed. Check the logs above for details."

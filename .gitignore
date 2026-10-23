@@ -1,0 +1,4 @@
+outputs/
+cpd-cli-workspace
+roles/install-wxo/files/wxo_deployment_backups
+*.tar*

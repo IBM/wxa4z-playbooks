@@ -1,0 +1,7 @@
+apiVersion: project.openshift.io/v1
+kind: Project
+metadata:
+  name: openshift-nfd
+  annotations:
+    openshift.io/display-name: "OpenShift Node Feature Discovery"
+    openshift.io/description: "Project for OCP Node Feature Discovery Operator"

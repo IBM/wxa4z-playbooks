@@ -1,0 +1,24 @@
+apiVersion: service.isf.ibm.com/v1
+kind: FusionServiceInstance
+metadata:
+  name: "{{ fdf_service_instance_name }}"
+  namespace: "{{ fdf_namespace }}"
+spec:
+  creator: User
+  doInstall: true
+  parameters:
+    - name: namespace
+      provided: false
+      value: "{{ fdf_storage_cluster_namespace }}"
+    - name: creator
+      provided: false
+      value: Fusion
+    - name: backingStorageType
+      provided: true
+      value: Local
+    - name: autoUpgrade
+      provided: true
+      value: 'false'
+  serviceDefinition: data-foundation-service
+  triggerUpdate: false
+  updateServiceCRSpec: false

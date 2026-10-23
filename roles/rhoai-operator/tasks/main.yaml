@@ -1,0 +1,47 @@
+---
+# RHOAI Operator Installation Role
+# This role supports architecture-specific installations
+# - s390x: IBM Z architecture
+# - x86_64: Intel/AMD 64-bit architecture (to be added)
+
+- name: Install RHOAI Operator on s390x
+  ansible.builtin.include_tasks: s390x.yaml
+  when: ansible_architecture == "s390x"
+  tags:
+    - install
+    - uninstall
+
+- name: Verify nvidia_gpu_enabled before running RHOAI on x86_64
+  ansible.builtin.fail:
+    msg: |
+      ABORTED: nvidia_gpu_enabled is set to false in your vars file.
+      The RHOAI Operator role on x86_64 requires NVIDIA GPU support to be enabled.
+      To proceed, set nvidia_gpu_enabled: true in your global vars file and re-run.
+      Playbook execution has been halted — no resources have been applied to the cluster.
+  when:
+    - ansible_architecture == "x86_64"
+    - not (nvidia_gpu_enabled | default(false) | bool)
+  tags:
+    - always
+
+- name: Install RHOAI Operator on x86_64
+  ansible.builtin.include_tasks: x86_64.yaml
+  when: ansible_architecture == "x86_64"
+  tags:
+    - install
+    - uninstall
+
+- name: Skip RHOAI Operator installation for unsupported architecture
+  when: ansible_architecture not in ["s390x", "x86_64"]
+  tags:
+    - install
+    - uninstall
+  block:
+    - name: Display unsupported architecture message
+      ansible.builtin.debug:
+        msg: |
+          RHOAI Operator installation skipped.
+          Supported architectures: s390x, x86_64
+          Current architecture: {{ ansible_architecture }}
+
+

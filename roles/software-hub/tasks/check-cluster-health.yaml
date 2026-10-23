@@ -1,0 +1,35 @@
+# Tasks in this file are from documentation provided here:
+# https://www.ibm.com/docs/en/software-hub/5.3.x?topic=hub-checking-health-your-cluster
+
+# TODOs 
+# - Unsure how this would fail if there are issues with the health checks. The "failed_when" criteria needs validation
+---
+- name: Checking cluster health
+  ansible.builtin.debug:
+    msg: "Checking cluster health..."
+
+- name: Run cpd-cli cluster healthcheck
+  ansible.builtin.command: cpd-cli health cluster
+  register: cluster_healthcheck_result
+  changed_when: false
+  failed_when: "'[FAIL]' in cluster_healthcheck_result.stdout"
+
+- name: Run cpd-cli node healthcheck
+  ansible.builtin.command: cpd-cli health nodes
+  register: node_healthcheck_result
+  changed_when: false
+  failed_when: "'[FAIL]' in node_healthcheck_result.stdout"
+
+- name: Run cpd-cli network healthcheck (online install mode)
+  ansible.builtin.command: cpd-cli health network-performance
+  register: network_healthcheck_result
+  changed_when: false
+  failed_when: "'[FAIL]' in network_healthcheck_result.stdout"
+  when: install_mode == 'online'
+
+- name: Run cpd-cli network healthcheck (airgap install mode)
+  ansible.builtin.command: "cpd-cli health network-performance --image-prefix={{ offline_registry }}"
+  register: network_healthcheck_result
+  changed_when: false
+  failed_when: "'[FAIL]' in network_healthcheck_result.stdout"
+  when: install_mode == 'offline'

@@ -1,0 +1,9 @@
+---
+# NVIDIA GPU Operator Role Default Variables
+# This role should only run on x86_64 architecture with NVIDIA GPUs available
+
+# Enable NVIDIA GPU operator installation
+# Defaults to global variable, can be overridden at role level if needed
+nvidia_gpu_enabled: "{{ nvidia_gpu_enabled | default(false) }}"
+
+

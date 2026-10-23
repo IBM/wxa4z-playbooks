@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: wxa4z-authorization-ca
+  namespace: wxa4z-zad
+type: Opaque
+stringData:
+  cert.p12: "{{ wxa4z_authorization_ca_cert }}"

@@ -1,0 +1,291 @@
+- name: Validate required variables for install-wxo role
+  tags: install
+  ansible.builtin.assert:
+    that:
+      - cpd_version is defined and cpd_version | length > 0
+      - path_cpd_cli_workspace is defined and path_cpd_cli_workspace | length > 0
+      - wxo_inferencing_stack is defined and wxo_inferencing_stack in ['aio', 'ifm', 'rhaiis']
+      - wxo_size is defined and wxo_size | length > 0
+      - wxo_install_mode is defined and wxo_install_mode | length > 0
+      - wxo_inferencing_stack != 'ifm' or wxo_internal_ifm is defined
+    fail_msg: |
+      The following variables are required by the install-wxo role but are missing or invalid.
+      Please configure them in vars/global.yaml:
+
+        cpd_version            - CPD release version (e.g. "5.3.1")
+                                 Current: {{ cpd_version | default('NOT SET') }}
+
+        path_cpd_cli_workspace - Local path to the cpd-cli workspace directory
+                                 Current: {{ path_cpd_cli_workspace | default('NOT SET') }}
+
+        wxo_inferencing_stack  - Inferencing stack: 'aio' (s390x/AI Optimizer), 'ifm' (x86_64/WatsonX AI), 'rhaiis' (RHAIIS endpoint)
+                                 Current: {{ wxo_inferencing_stack | default('NOT SET') }}
+
+        wxo_size               - Deployment size: 'small', 'medium', or 'large'
+                                 Current: {{ wxo_size | default('NOT SET') }}
+
+        wxo_install_mode       - Install mode: 'agentic' or 'conversational'
+                                 Current: {{ wxo_install_mode | default('NOT SET') }}
+
+        wxo_internal_ifm       - true/false — only relevant when wxo_inferencing_stack == 'ifm'
+                                 true = same-cluster IFM, false = external IFM endpoint
+                                 Current: {{ wxo_internal_ifm | default('NOT SET') }}
+    success_msg: "install-wxo variable validation passed"
+
+- name: Run installation steps for Watsonx Orchestrate
+  tags: install
+  block:
+    - name: Download WxO case bundle
+      ansible.builtin.command: >
+        cpd-cli manage case-download \
+        --components=watsonx_orchestrate \
+        --release={{ cpd_version }} \
+        --operator_ns=cpd-operators \
+        --cluster_resources=true
+        {% if cpd_version == '5.3.1' %}\
+        --patch_download=false
+        {% endif %}
+      changed_when: false
+
+    - name: Check if patch folder exists in offline work directory
+      ansible.builtin.stat:
+        path: "{{ path_cpd_cli_workspace }}/work/offline/patch"
+      register: offline_patch_dir
+
+    - name: Delete patch folder from offline work directory
+      ansible.builtin.file:
+        path: "{{ path_cpd_cli_workspace }}/work/offline/patch"
+        state: absent
+      become: true
+      when: offline_patch_dir.stat.exists and offline_patch_dir.stat.isdir
+
+    - name: Fix YAML formatting issues in cluster_scoped_resources.yaml
+      ansible.builtin.replace:
+        path: "{{ path_cpd_cli_workspace }}/work/cluster_scoped_resources.yaml"
+        regexp: '\t'
+        replace: '  '
+      changed_when: false
+
+    - name: Apply cluster-scoped resources for Software Hub from cpd-cli-workspace directory
+      kubernetes.core.k8s:
+        apply: true
+        src: "{{ path_cpd_cli_workspace }}/work/cluster_scoped_resources.yaml"
+        server_side_apply:
+          field_manager: "ansible"
+          force_conflicts: true
+
+    - name: Ensure outputs directory exists
+      ansible.builtin.file:
+        path: "{{ software_hub_outputs_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy Software Hub cluster-scoped resources to outputs directory
+      ansible.builtin.copy:
+        src: "{{ path_cpd_cli_workspace }}/work/cluster_scoped_resources.yaml"
+        dest: "{{ software_hub_outputs_dir }}/wxo-{{ cpd_version }}-cluster_scoped_resources.yaml"
+        mode: '0644'
+    
+    - name: Generate install-options.yml from template
+      ansible.builtin.template:
+        src: templates/install-options.yml.j2
+        dest: "{{ path_cpd_cli_workspace }}/work/install-options.yml"
+
+    # -------------------------------------------------------------------------
+    # hotfix-5314 must be applied mid-flight on 5.3.1 (all architectures).
+    # cpd-cli blocks until WO reaches Ready, but WO cannot reach Ready without
+    # the hotfix. Run cpd-cli async so Ansible can apply the hotfix once the
+    # WO CR appears, then rejoin the background job.
+    # -------------------------------------------------------------------------
+    - name: Install Watsonx Orchestrate (async, hotfix applied mid-flight)
+      when: cpd_version == "5.3.1"
+      block:
+        # async: 14400 = 4-hour ceiling  |  poll: 0 = fire-and-forget
+        - name: Launch cpd-cli install-components in background
+          ansible.builtin.command: >
+            cpd-cli manage install-components \
+            --license_acceptance=true \
+            --components=watsonx_orchestrate \
+            --release={{ cpd_version }} \
+            --operator_ns={{ cpd_operators_ns }} \
+            --instance_ns={{ cpd_instance_ns }} \
+            --block_storage_class={{ software_hub_block_storage_class }} \
+            --file_storage_class={{ software_hub_file_storage_class }} \
+            --image_pull_prefix={{ software_hub_image_pull_prefix }} \
+            --image_pull_secret={{ software_hub_image_pull_secret }} \
+            --skip_components=watson_assistant \
+            --param-file=/tmp/work/install-options.yml
+          async: 14400
+          poll: 0
+          changed_when: false
+          register: install_wxo_job
+        
+        # WO CR is created early, but we must wait for the operator to
+        # populate the status version field before running the hotfix script.
+        - name: Wait for WatsonX Orchestrate CR status version to be populated
+          ansible.builtin.command: >
+            oc get wo -n {{ cpd_instance_ns }} -o jsonpath='{.items[0].status.versionStatus.status}'
+          register: wo_cr_version_check
+          until: wo_cr_version_check.stdout == cpd_version
+          retries: 60
+          delay: 15
+          changed_when: false
+
+        # Skip the stabilisation wait if the hotfix label is already present on
+        # the WO CR, indicating the hotfix has already been applied.
+        - name: Check if hotfix is already applied on WO CR
+          ansible.builtin.command: >
+            oc get wo wo -n {{ cpd_instance_ns }}
+            -o jsonpath='{.metadata.labels.hotfix}'
+          register: wo_hotfix_label
+          changed_when: false
+          failed_when: false
+
+        # Wait for WoComponentServices CR to exist before applying the hotfix.
+        # The original 5.3.1 operator creates this CR ~5 min after the WO CR
+        # appears. Applying the hotfix before this CR exists triggers a race
+        # condition: the 5.3.1.4 operator creates the CR itself, which causes
+        # wo-mcp-context-forge — a component with a known product bug in this
+        # release — to be deployed. Gating here ensures the 5.3.1 operator
+        # writes the CR first, so the race condition and the bug are both avoided.
+        # Skipped entirely if the hotfix label is already present on the WO CR.
+        - name: Wait for WoComponentServices CR to exist before applying hotfix
+          ansible.builtin.command: >
+            oc get wocomponentservices wo-components-services
+            -n {{ cpd_instance_ns }}
+            -o jsonpath='{.metadata.name}'
+          register: wo_component_services_check
+          until: wo_component_services_check.stdout | length > 0
+          retries: 40
+          delay: 15
+          changed_when: false
+          failed_when: false
+          when: wo_hotfix_label.stdout != '5.3.1.4'
+
+        # Apply the hotfix now that the CR exists. The async cpd-cli is still
+        # running in the background and will see WO go Ready after this.
+        - name: Run hotfix-5314.sh
+          ansible.builtin.command: >
+            bash {{ role_path }}/files/hotfix-5314.sh
+          environment:
+            PROJECT_CPD_INST_OPERATORS: "{{ cpd_operators_ns }}"
+            PROJECT_CPD_INST_OPERANDS: "{{ cpd_instance_ns }}"
+          register: hotfix_result
+          changed_when: true
+
+        - name: Print hotfix-5314.sh output
+          ansible.builtin.debug:
+            msg: "{{ hotfix_result.stdout_lines }}"
+
+        - name: Apply s390x channel-integrations digest override
+          when: ansible_architecture == 's390x'
+          ansible.builtin.command: >
+            oc patch wo wo
+            -n {{ cpd_instance_ns }}
+            --type=merge
+            --patch '{"spec":{"image":{"digestOverrides":{"channel-integrations":"sha256:5db27d33535eb84857888ce5e74c9ec8b7a594e203d5b2265ffb45a25081df9d"}}}}'
+          changed_when: true
+
+        - name: Apply s390x pgbouncer idle_transaction_timeout patch
+          when: ansible_architecture == 's390x'
+          ansible.builtin.command: >
+            oc patch watsonxorchestrates.wo.watsonx.ibm.com/wo
+            -n {{ cpd_instance_ns }}
+            --type=merge
+            -p '{"spec":{"pgbouncer":{"config":{"global":{"idle_transaction_timeout":"180"}}}}}'
+          changed_when: true
+
+        # Rejoin the background job — blocks until cpd-cli exits.
+        # retries * delay must cover the install ceiling (288 × 30s = 144 min).
+        - name: Wait for watsonx orchestrate installation to complete
+          ansible.builtin.async_status:
+            jid: "{{ install_wxo_job.ansible_job_id }}"
+          register: install_wxo_result
+          until: install_wxo_result.finished
+          retries: 288
+          delay: 30
+
+        - name: Print cpd-cli install-components output
+          ansible.builtin.debug:
+            msg: "{{ install_wxo_result.stdout_lines }}"
+
+        - name: Apply WxO resource size overrides
+          kubernetes.core.k8s:
+            state: patched
+            api_version: wo.watsonx.ibm.com/v1
+            kind: WatsonxOrchestrate
+            name: wo
+            namespace: "{{ cpd_instance_ns }}"
+            definition:
+              spec:
+                sizeMapping:
+                  skill-server:
+                    replicas: 1
+                    resources:
+                      requests:
+                        cpu: "200m"
+                        memory: "1Gi"
+                      limits:
+                        cpu: "2"
+                        memory: "4Gi"
+                  tools-runtime-manager:
+                    resources:
+                      requests:
+                        cpu: "200m"
+                        memory: "1Gi"
+                      limits:
+                        cpu: "1"
+                        memory: "3Gi"
+                  archer-server:
+                    resources:
+                      requests:
+                        cpu: "500m"
+                        memory: "3Gi"
+                      limits:
+                        cpu: "1.5"
+                        memory: "5Gi"
+                  builder-ui:
+                    resources:
+                      requests:
+                        cpu: "200m"
+                  conversation_controller_mapper:
+                    resources:
+                      requests:
+                        cpu: "500m"
+                        memory: "500Mi"
+                      limits:
+                        cpu: "1"
+                        memory: "2Gi"
+                  socket_handler:
+                    resources:
+                      requests:
+                        cpu: "500m"
+                      limits:
+                        cpu: "1"
+                  voice-controller:
+                    resources:
+                      requests:
+                        cpu: "200m"
+                      limits:
+                        cpu: "1"
+                        memory: "2Gi"
+                  wxo-connections:
+                    resources:
+                      requests:
+                        cpu: "200m"
+                  wxo-connections-ui:
+                    resources:
+                      requests:
+                        cpu: "200m"
+                  ai-gateway:
+                    resources:
+                      requests:
+                        cpu: "300m"
+                  platform-ui:
+                    resources:
+                      requests:
+                        cpu: "200m"
+                  postgres:
+                    resources:
+                      requests:
+                        cpu: "200m"

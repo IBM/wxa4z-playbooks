@@ -1,0 +1,477 @@
+---
+# Configure Model Gateway Role
+# This role runs CLI commands to configure the model gateway
+#
+# Tags:
+#   - ifm: Configure Model Gateway for IFM (IBM Foundation Models) inferencing stack
+#   - aio: Configure Model Gateway for AIO (AI Optimizer) inferencing stack
+#   - rhaiis: Configure Model Gateway for RHAIIS (Red Hat AI Inference Server)
+#   - uninstall: Remove Model Gateway configuration
+#
+# Prerequisites:
+#   - User must be logged into OpenShift cluster (oc login)
+#   - orchestrate CLI must be installed (see installation check below)
+
+# =============================================================================
+# VARIABLE VALIDATION
+# =============================================================================
+
+- name: Validate required variables for configure-model-gateway aio path
+  tags:
+    - aio
+  ansible.builtin.assert:
+    that:
+      - aio_cluster_ip is defined and aio_cluster_ip | length > 0
+      - aio_api_key is defined and aio_api_key | length > 0
+    fail_msg: |
+      The following variables are required by the configure-model-gateway role for the aio path but are missing or invalid.
+      Please configure them in vars/global.yaml:
+
+        aio_cluster_ip             - AI Optimizer endpoint hostname or IP
+                                     Current: {{ aio_cluster_ip | default('NOT SET') }}
+        aio_api_key                - AI Optimizer API key
+                                     Current: {{ aio_api_key | default('NOT SET') }}
+    success_msg: "configure-model-gateway aio variable validation passed"
+
+- name: Validate required variables for configure-model-gateway ifm path
+  tags:
+    - ifm
+  ansible.builtin.assert:
+    that:
+      - watsonx_url is defined and watsonx_url | length > 0
+      - watsonx_api_key is defined and watsonx_api_key | length > 0
+      - watsonx_model_id is defined and watsonx_model_id | length > 0
+      - watsonx_space_id is defined and watsonx_space_id | length > 0
+    fail_msg: |
+      The following variables are required by the configure-model-gateway role for the ifm path but are missing or invalid.
+      Please configure them in vars/global.yaml:
+
+        watsonx_url                - WatsonX endpoint URL
+                                     Current: {{ watsonx_url | default('NOT SET') }}
+        watsonx_api_key            - WatsonX API key
+                                     Current: {{ watsonx_api_key | default('NOT SET') }}
+        watsonx_model_id           - WatsonX model identifier
+                                     Current: {{ watsonx_model_id | default('NOT SET') }}
+        watsonx_space_id           - WatsonX deployment space ID
+                                     Current: {{ watsonx_space_id | default('NOT SET') }}
+    success_msg: "configure-model-gateway ifm variable validation passed"
+
+- name: Validate required variables for configure-model-gateway rhaiis path
+  tags:
+    - rhaiis
+  ansible.builtin.assert:
+    that:
+      - rhaiis_inferencing_endpoint is defined and rhaiis_inferencing_endpoint | length > 0
+      - rhaiis_api_key is defined and rhaiis_api_key | length > 0
+    fail_msg: |
+      The following variables are required by the configure-model-gateway role for the rhaiis path but are missing or invalid.
+      Please configure them in vars/global.yaml:
+
+        rhaiis_inferencing_endpoint - RHAIIS inferencing endpoint URL
+                                      Current: {{ rhaiis_inferencing_endpoint | default('NOT SET') }}
+        rhaiis_api_key              - RHAIIS API key
+                                      Current: {{ rhaiis_api_key | default('NOT SET') }}
+    success_msg: "configure-model-gateway rhaiis variable validation passed"
+
+# =============================================================================
+# TAG VALIDATION
+# =============================================================================
+
+- name: Check if valid tag is specified for model-gateway role
+  ansible.builtin.fail:
+    msg: |
+      ============================================================
+      ERROR: Invalid tag for model-gateway role!
+
+      This role requires one of the following tags:
+        - ifm: Configure Model Gateway for IFM (IBM Foundation Models)
+        - aio: Configure Model Gateway for AIO (AI Optimizer)
+        - rhaiis: Configure Model Gateway for RHAIIS (Red Hat AI Inference Server)
+        - uninstall: Remove Model Gateway configuration
+
+      You provided: {{ ansible_run_tags | join(', ') }}
+
+      Usage examples:
+        ansible-playbook install-wxa4z.yml --tags ifm
+        ansible-playbook install-wxa4z.yml --tags aio
+        ansible-playbook install-wxa4z.yml --tags rhaiis
+        ansible-playbook install-wxa4z.yml --tags uninstall
+
+      Please specify a valid tag and try again.
+      ============================================================
+  when:
+    - "'ifm' not in ansible_run_tags"
+    - "'aio' not in ansible_run_tags"
+    - "'rhaiis' not in ansible_run_tags"
+    - "'uninstall' not in ansible_run_tags"
+  tags:
+    - always
+
+# =============================================================================
+# COMMON STEPS - ORCHESTRATE CLI CHECK
+# =============================================================================
+
+- name: Check if orchestrate CLI is installed
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  ansible.builtin.command: which orchestrate
+  register: orchestrate_check
+  failed_when: false
+  changed_when: false
+
+- name: Display orchestrate CLI installation instructions
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  when: orchestrate_check.rc != 0
+  ansible.builtin.fail:
+    msg: |
+      ============================================================
+      orchestrate CLI is not installed or not in PATH.
+
+      Please install the orchestrate CLI by following the instructions at:
+      https://developer.watson-orchestrate.ibm.com/getting_started/installing
+
+      ============================================================
+
+# =============================================================================
+# COMMON STEPS - GET CPD CREDENTIALS
+# =============================================================================
+
+- name: Get CPD admin credentials from secret
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: ibm-iam-bindinfo-platform-auth-idp-credentials
+    namespace: "{{ cpd_instance_ns }}"
+  register: cpd_secret
+  when: admin_password is not defined
+
+- name: Extract CPD admin password
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  ansible.builtin.set_fact:
+    cpd_password: "{{ admin_password if admin_password is defined else (cpd_secret.resources[0].data.admin_password | b64decode) }}"
+
+# =============================================================================
+# COMMON STEPS - GET CPD HOST URL
+# =============================================================================
+
+- name: Get CPD Route
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Route
+    name: cpd
+    namespace: "{{ cpd_instance_ns }}"
+  register: cpd_route_for_url
+  when: cpd_url is not defined
+
+- name: Set CPD host URL and bare hostname
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  ansible.builtin.set_fact:
+    cpd_host_url: "{{ 'https://' + cpd_url if cpd_url is defined else 'https://' + cpd_route_for_url.resources[0].spec.host }}"
+    cpd_url: "{{ cpd_url if cpd_url is defined else cpd_route_for_url.resources[0].spec.host }}"
+
+# Derive a short slug from the CPD hostname to scope ADK env names per-cluster.
+# e.g. "cpd-cpd-instance-1.apps.wxa4z8.example.com" → "cpd-instance-1"
+# Mirrors the CPD_SLUG logic in configure_model_gateway.sh.
+- name: Derive CPD slug for ADK environment naming
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  ansible.builtin.set_fact:
+    cpd_slug: "{{ cpd_url | regex_replace('^cpd-', '') | regex_replace('\\..*$', '') }}"
+
+# =============================================================================
+# COMMON STEPS - GENERATE CPD AUTH TOKEN
+# Needed to call the zen-data tenant listing API.
+# =============================================================================
+
+- name: Generate CPD auth token
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  ansible.builtin.uri:
+    url: "https://{{ cpd_url }}/icp4d-api/v1/authorize"
+    method: POST
+    body_format: json
+    body:
+      username: "cpadmin"
+      password: "{{ cpd_password }}"
+    headers:
+      cache-control: "no-cache"
+    validate_certs: false
+    status_code: 200
+  register: _auth_token_response
+  changed_when: false
+  no_log: true
+
+- name: Extract CPD auth token
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+    - uninstall
+  ansible.builtin.set_fact:
+    auth_token: "{{ _auth_token_response.json.token }}"
+  no_log: true
+
+# =============================================================================
+# COMMON STEPS - IFM: FETCH CPD API KEY FROM SECRET
+# =============================================================================
+
+- name: Check if cpd-api-key secret exists
+  tags:
+    - ifm
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: cpd-api-key
+    namespace: "{{ cpd_instance_ns }}"
+  register: cpd_api_key_secret
+  when: api_key is not defined
+  failed_when: false
+
+- name: Set cpd_api_key from available sources (IFM only)
+  tags:
+    - ifm
+  ansible.builtin.set_fact:
+    cpd_api_key: >-
+      {{
+        api_key if api_key is defined
+        else (cpd_api_key_secret.resources[0].data['cpd-api-key'] | b64decode if (cpd_api_key_secret.resources is defined and cpd_api_key_secret.resources | length > 0)
+        else cpd_api_key)
+      }}
+
+# =============================================================================
+# TENANT DISCOVERY
+# Fetch all tenants, filter to target_tenants, detect existing default models,
+# and print the discovery table before any configuration begins.
+# =============================================================================
+
+- name: Fetch all WxO tenants from CPD API
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.uri:
+    url: "https://{{ cpd_url }}/zen-data/v3/service_instances?addon_type=orchestrate"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ auth_token }}"
+      Accept: "application/json"
+    validate_certs: false
+    status_code: 200
+  register: _mgw_tenants_response
+  changed_when: false
+  no_log: true
+
+- name: Parse tenant list
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.set_fact:
+    all_wxo_tenants: "{{ _mgw_tenants_response.json.service_instances | default([]) }}"
+
+- name: Fail if no tenants found
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.fail:
+    msg: |
+      ============================================================
+      ERROR: No WxO tenants found on this CPD deployment.
+      Check that watsonx Orchestrate is installed and instances
+      have been created (run the create-wxo-instance role first).
+      ============================================================
+  when: all_wxo_tenants | length == 0
+
+- name: Build filtered tenant list
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.set_fact:
+    filtered_wxo_tenants: >-
+      {%- set tt = target_tenants | default(-1) -%}
+      {%- if tt | string == '-1' -%}
+        {{ all_wxo_tenants }}
+      {%- else -%}
+        {%- set tokens = (tt if tt is iterable and tt is not string else [tt | string])
+                         | map('lower') | map('trim') | list -%}
+        {%- set result = [] -%}
+        {%- for t in all_wxo_tenants -%}
+          {%- if (t.id | default('') | string | lower) in tokens
+               or (t.display_name | default('') | lower) in tokens -%}
+            {%- set _ = result.append(t) -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {{ result }}
+      {%- endif -%}
+
+- name: Fail if target_tenants filter matched nothing
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.fail:
+    msg: |
+      ============================================================
+      ERROR: target_tenants matched no tenants.
+
+      Available tenants on this CPD deployment:
+      {% for t in all_wxo_tenants %}
+        - {{ t.display_name }} (id: {{ t.id }})
+      {% endfor %}
+
+      Provide exact tenant display names or set target_tenants: -1 to target all tenants.
+      ============================================================
+  when:
+    - target_tenants | default(-1) | string != '-1'
+    - filtered_wxo_tenants | length == 0
+
+- name: Initialise discovered_tenants list
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.set_fact:
+    discovered_tenants: []
+
+- name: Detect current default model for each tenant
+  ansible.builtin.include_tasks:
+    file: "{{ playbook_dir }}/roles/list-wxo-tenants/tasks/detect-tenant-model.yaml"
+    apply:
+      tags:
+        - ifm
+        - aio
+        - rhaiis
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  loop: "{{ filtered_wxo_tenants }}"
+  loop_control:
+    loop_var: discovery_tenant
+    label: "{{ discovery_tenant.display_name }}"
+
+- name: Display tenant discovery table
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.command:
+    argv:
+      - bash
+      - "{{ playbook_dir }}/roles/list-wxo-tenants/files/print-tenant-table.sh"
+      - "{{ cpd_url }}"
+      - "{{ discovered_tenants | to_json }}"
+      - "WxO Tenant Discovery"
+  register: _mgw_table
+  changed_when: false
+
+- name: Print tenant discovery table
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.debug:
+    msg: "{{ _mgw_table.stdout_lines }}"
+
+# =============================================================================
+# INITIALISE RUN ACCUMULATORS
+# =============================================================================
+
+- name: Initialise run tracking lists
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.set_fact:
+    mgw_succeeded: []
+    mgw_skipped: []
+
+# =============================================================================
+# CONFIGURE LOOP — iterate over discovered_tenants
+# For each tenant: activate env, apply stack-specific config, record outcome.
+# Tenants with an existing default model are skipped automatically.
+# =============================================================================
+
+- name: Configure Model Gateway for each tenant
+  ansible.builtin.include_tasks:
+    file: configure-tenant.yaml
+    apply:
+      tags:
+        - ifm
+        - aio
+        - rhaiis
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  loop: "{{ discovered_tenants }}"
+  loop_control:
+    loop_var: current_tenant
+    label: "{{ current_tenant.name }}"
+
+# =============================================================================
+# RUN SUMMARY
+# =============================================================================
+
+- name: Display run summary
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.command:
+    argv:
+      - bash
+      - "{{ role_path }}/files/print-run-summary.sh"
+      - "{{ mgw_succeeded | to_json }}"
+      - "{{ mgw_skipped | to_json }}"
+  register: _mgw_summary
+  changed_when: false
+
+- name: Print run summary
+  tags:
+    - ifm
+    - aio
+    - rhaiis
+  ansible.builtin.debug:
+    msg: "{{ _mgw_summary.stdout_lines }}"
+
+# =============================================================================
+# UNINSTALL — delegates to uninstall.yaml which runs its own tenant loop
+# =============================================================================
+
+- name: Uninstall Model Gateway Configuration
+  tags: uninstall
+  ansible.builtin.import_tasks: uninstall.yaml

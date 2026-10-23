@@ -1,0 +1,356 @@
+---
+
+- name: Run install steps for wxa4z-v3.3 ZAssistantDeploy
+  tags:
+    - install
+    - zad
+  block:
+
+    # ── Variable Mapping: Derive llm_base_url and llm_api_key from inferencing stack ──
+    # This consolidates credentials from different sources (AIO, RHAIIS, WatsonX) into
+    # the unified llm_base_url/llm_api_key variables used by the templates.
+    
+    - name: Set LLM credentials for AIO (AI Optimizer)
+      ansible.builtin.set_fact:
+        llm_base_url: "https://{{ aio_cluster_ip }}/api/com.ibm.aioinference/v1"
+        llm_api_key: "{{ aio_api_key }}"
+      when:
+        - model_runtime == "openai_protocol"
+        - aio_cluster_ip is defined
+        - aio_cluster_ip != ""
+        - aio_api_key is defined
+        - aio_api_key != ""
+
+    - name: Set LLM credentials for RHAIIS (Red Hat AI Inference Server)
+      ansible.builtin.set_fact:
+        llm_base_url: "{{ rhaiis_inferencing_endpoint }}"
+        llm_api_key: "{{ rhaiis_api_key }}"
+      when:
+        - model_runtime == "openai_protocol"
+        - rhaiis_inferencing_endpoint is defined
+        - rhaiis_inferencing_endpoint != ""
+        - rhaiis_api_key is defined
+        - rhaiis_api_key != ""
+        - (aio_cluster_ip is not defined or aio_cluster_ip == "")
+
+    - name: Validate LLM credentials are set for openai_protocol mode
+      ansible.builtin.fail:
+        msg: |
+          When model_runtime is 'openai_protocol', you must set either:
+          - aio_cluster_ip and aio_api_key (for AI Optimizer), OR
+          - rhaiis_inferencing_endpoint and rhaiis_api_key (for RHAIIS)
+          
+          Please configure the appropriate credentials in vars/global.yaml
+      when:
+        - model_runtime == "openai_protocol"
+        - (llm_base_url is not defined or llm_base_url == "" or llm_api_key is not defined or llm_api_key == "")
+
+    - name: Display derived LLM credentials (openai_protocol mode)
+      ansible.builtin.debug:
+        msg: |
+          LLM Credentials derived for openai_protocol mode:
+          - llm_base_url: {{ llm_base_url }}
+          - llm_api_key: [REDACTED]
+      when:
+        - model_runtime == "openai_protocol"
+        - llm_base_url is defined
+        - llm_base_url != ""
+
+    - name: Create wxa4z-zad namespace
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ role_path }}/files/zassistant-deploy/wxa4z-zad-namespace.yaml"
+
+    - name: Create wxa4z-client-ingestion-pvc
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: wxa4z-client-ingestion-pvc
+            namespace: wxa4z-zad
+            labels:
+              app.kubernetes.io/name: wxa4z-client-ingestion
+              app.kubernetes.io/managed-by: wxa4z-deploy-script
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 8Gi
+            storageClassName: ocs-storagecluster-cephfs
+
+    - name: Check if wxa4z-ingestion-credentials secret already exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: wxa4z-ingestion-credentials
+        namespace: wxa4z-zad
+      register: ingestion_creds_check
+
+    # - name: Create wxa4z-ingestion-credentials secret (skeleton — ingestion-manager populates NATS fields)
+    #   kubernetes.core.k8s:
+    #     state: present
+    #     definition: "{{ lookup('template', role_path + '/templates/zassistant-deploy/wxa4z-ingestion-credentials.yaml.j2') }}"
+    #   when: ingestion_creds_check.resources | length == 0
+
+    - name: Create wxa4z-ingestion-credentials secret (skeleton — ingestion-manager populates NATS fields)
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ role_path }}/files/zassistant-deploy/wxa4z-ingestion-credentials.yaml"
+      when: ingestion_creds_check.resources | length == 0
+
+    - name: Create opensearch-creds secret
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/templates/zassistant-deploy/opensearch-secret.yaml.j2') }}"
+
+    - name: Create wrapper-creds secret
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/templates/zassistant-deploy/wrapper-secret.yaml.j2') }}"
+
+    - name: Create wxa4z-authorization-secrets
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/templates/zassistant-deploy/wxa4z-authorization-secrets.yaml.j2') }}"
+
+    - name: Create wxa4z-authorization-ca secret
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/templates/zassistant-deploy/wxa4z-authorization-ca.yaml.j2') }}"
+
+    - name: Create wxa4z-zos-topology-secrets
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/templates/zassistant-deploy/zos-topology-service.yaml.j2') }}"
+
+    - name: Create wxa4z-ifm-credentials secret
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/templates/zassistant-deploy/wxa4z-ifm-credentials.yaml.j2') }}"
+
+    # ── Transform API key generation ──────────────────────────────────────
+    - name: Check if transform-secret already exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: transform-secret
+        namespace: wxa4z-zad
+      register: transform_secret_check
+
+    - name: Generate TRANSFORM_API_KEY
+      ansible.builtin.command: openssl rand -base64 32
+      register: transform_api_key_new
+      changed_when: true
+      no_log: true
+      when: transform_secret_check.resources | length == 0
+
+    - name: Set transform_api_key_generated from newly generated value
+      ansible.builtin.set_fact:
+        transform_api_key_generated: "{{ transform_api_key_new.stdout }}"
+      no_log: true
+      when: transform_secret_check.resources | length == 0
+
+    - name: Set transform_api_key_generated from existing secret
+      ansible.builtin.set_fact:
+        transform_api_key_generated: "{{ transform_secret_check.resources[0].data.TRANSFORM_API_KEY | b64decode }}"
+      no_log: true
+      when: transform_secret_check.resources | length > 0
+
+    - name: Create transform-secret
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/templates/zassistant-deploy/transform-secret.yaml.j2') }}"
+      when: transform_secret_check.resources | length == 0
+
+    - name: Create wxa4z-watsonx-credentials secret
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/templates/zassistant-deploy/wxa4z-watsonx-credentials.yaml.j2') }}"
+
+    # ── NATS credential generation (mirrors create_nats_credentials() in the deploy script) ──
+    - name: Check if nats-operator-credentials secret already exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: nats-operator-credentials
+        namespace: wxa4z-zad
+      register: nats_operator_secret_check
+
+    - name: Check if nats-sys-account-credentials secret already exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: nats-sys-account-credentials
+        namespace: wxa4z-zad
+      register: nats_sys_secret_check
+
+    - name: Generate NATS operator and SYS account credentials via nsc
+      when: >
+        nats_operator_secret_check.resources | length == 0 or
+        nats_sys_secret_check.resources | length == 0
+      block:
+
+        - name: Detect nsc binary location and local architecture
+          ansible.builtin.shell: |
+            # Resolve existing nsc path — verify it actually runs on this machine
+            if command -v nsc &>/dev/null && nsc --version &>/dev/null 2>&1; then
+              nsc_path="nsc"
+            elif [ -x /tmp/nsc ] && /tmp/nsc --version &>/dev/null 2>&1; then
+              nsc_path="/tmp/nsc"
+            else
+              nsc_path=""
+            fi
+            # Detect local OS and architecture (not cluster nodes)
+            local_os=$(uname -s | tr '[:upper:]' '[:lower:]')
+            local_arch=$(uname -m)
+            echo "${nsc_path}|${local_os}|${local_arch}"
+          register: nsc_detect_out
+          changed_when: false
+
+        - name: Set nsc detection facts
+          ansible.builtin.set_fact:
+            nsc_detected_path: "{{ nsc_detect_out.stdout.split('|')[0] }}"
+            local_os: "{{ nsc_detect_out.stdout.split('|')[1] }}"
+            local_arch: "{{ nsc_detect_out.stdout.split('|')[2] }}"
+
+        # ── Linux s390x: install bundled nsc binary ──
+        - name: Extract bundled nsc binary for Linux s390x
+          ansible.builtin.shell: |
+            tar -xzf "{{ role_path }}/files/zassistant-deploy/nsc-s390x.tgz" \
+              --strip-components=3 \
+              -C /tmp \
+              nsc/build/nsc_linux_s390x/nsc
+            chmod +x /tmp/nsc
+          when:
+            - local_os == "linux"
+            - local_arch == "s390x"
+            - nsc_detected_path == ""
+
+        # ── Linux arm64: install bundled nsc binary ──
+        - name: Extract bundled nsc binary for Linux arm64
+          ansible.builtin.shell: |
+            tar -xzf "{{ role_path }}/files/zassistant-deploy/nsc-arm64.tgz" \
+              -C /tmp \
+              nsc
+            chmod +x /tmp/nsc
+          when:
+            - local_os == "linux"
+            - local_arch in ["arm64", "aarch64"]
+            - nsc_detected_path == ""
+
+        # ── macOS / other: download nsc from GitHub ──
+        - name: Download nsc binary
+          ansible.builtin.shell: |
+            os_name="{{ local_os }}"
+            arch_name="{{ local_arch }}"
+            case "$arch_name" in
+              x86_64)  arch_name="amd64" ;;
+              aarch64|arm64) arch_name="arm64" ;;
+            esac
+            curl -sL "https://github.com/nats-io/nsc/releases/download/v2.8.6/nsc-${os_name}-${arch_name}.zip" \
+              -o /tmp/nsc.zip
+            (cd /tmp && unzip -o nsc.zip nsc >/dev/null 2>&1)
+            chmod +x /tmp/nsc
+          when:
+            - not (local_os == "linux" and local_arch in ["s390x", "arm64", "aarch64"])
+            - nsc_detected_path == ""
+
+        - name: Set nsc_bin fact
+          ansible.builtin.set_fact:
+            nsc_bin: "{{ nsc_detected_path if nsc_detected_path != '' else '/tmp/nsc' }}"
+
+        - name: Generate NATS operator, SYS account JWTs and seeds
+          ansible.builtin.script:
+            cmd: "{{ role_path }}/scripts/generate-nats-creds.sh {{ nsc_bin }}"
+          register: nats_generated
+          changed_when: true
+
+        - name: Parse generated NATS credential values
+          ansible.builtin.set_fact:
+            nats_operator_jwt_generated:   "{{ nats_generated.stdout_lines[0] }}"
+            nats_operator_seed_generated:  "{{ nats_generated.stdout_lines[1] }}"
+            nats_sys_account_jwt_generated: "{{ nats_generated.stdout_lines[2] }}"
+            nats_sys_account_seed_generated: "{{ nats_generated.stdout_lines[3] }}"
+          no_log: true
+
+        - name: Create nats-operator-credentials secret
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: nats-operator-credentials
+                namespace: wxa4z-zad
+              type: Opaque
+              stringData:
+                operator.jwt: "{{ nats_operator_jwt_generated }}"
+                operator.seed: "{{ nats_operator_seed_generated }}"
+
+        - name: Create nats-sys-account-credentials secret
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: nats-sys-account-credentials
+                namespace: wxa4z-zad
+              type: Opaque
+              stringData:
+                sys-account.jwt: "{{ nats_sys_account_jwt_generated }}"
+                sys-account.seed: "{{ nats_sys_account_seed_generated }}"
+
+    - name: NATS credentials already exist — skipping generation
+      ansible.builtin.debug:
+        msg: "nats-operator-credentials and nats-sys-account-credentials already exist in wxa4z-zad"
+      when: >
+        nats_operator_secret_check.resources | length > 0 and
+        nats_sys_secret_check.resources | length > 0
+
+    - name: Get OpenShift ingress domain
+      kubernetes.core.k8s_info:
+        api_version: operator.openshift.io/v1
+        kind: IngressController
+        name: default
+        namespace: openshift-ingress-operator
+      register: ingress_info
+
+    - name: Fail if domain not found
+      fail:
+        msg: "Could not retrieve ingress domain"
+      when: ingress_info.resources | length == 0
+
+    - name: Set cluster_domain fact
+      set_fact:
+        cluster_domain: "{{ ingress_info.resources[0].status.domain }}"
+
+    - name: Apply ZAssistantDeploy CR
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', role_path + '/templates/zassistant-deploy/zassistantdeploy.yaml.j2') }}"
+
+    - name: Wait for ZAssistantDeploy to be deployed
+      kubernetes.core.k8s_info:
+        api_version: wxa4z.watsonx.ibm.com/v1
+        kind: ZAssistantDeploy
+        name: zassistantdeploy
+        namespace: wxa4z-zad
+      register: zad_status
+      until: >
+        zad_status.resources | length > 0 and
+        zad_status.resources[0].status is defined and
+        zad_status.resources[0].status.conditions is defined and
+        (
+          zad_status.resources[0].status.conditions
+          | selectattr('type', 'equalto', 'Deployed')
+          | selectattr('status', 'equalto', 'True')
+          | list
+          | length
+        ) > 0
+      retries: 90
+      delay: 20
+      failed_when: false

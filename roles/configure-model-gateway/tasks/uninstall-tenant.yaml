@@ -1,0 +1,152 @@
+---
+# =============================================================================
+# UNINSTALL TENANT
+# Called once per tenant by uninstall.yaml.
+# Loop variable: uninst_tenant  (id, display_name, namespace)
+# =============================================================================
+
+# Derive the ADK env name using the same formula as configure-tenant.yaml and
+# detect-tenant-model.yaml so we target the correct environment.
+- name: "Derive ADK env name for uninstall of tenant '{{ uninst_tenant.display_name }}'"
+  ansible.builtin.set_fact:
+    _uninst_env: >-
+      wxo-env-{{ cpd_slug }}-{{ uninst_tenant.display_name
+                                  | lower
+                                  | regex_replace('[^a-z0-9]+', '-')
+                                  | regex_replace('^-+|-+$', '') }}
+    _uninst_connection_name: >-
+      wxo-env-{{ cpd_slug }}-{{ uninst_tenant.display_name
+                                  | lower
+                                  | regex_replace('[^a-z0-9]+', '-')
+                                  | regex_replace('^-+|-+$', '') }}-mgw-credentials
+    _uninst_inst_url: >-
+      {{ cpd_host_url }}/orchestrate/{{ uninst_tenant.namespace }}/instances/{{ uninst_tenant.id }}
+
+# ── Step 1: Add + Activate ADK environment ───────────────────────────────────
+
+- name: "Add ADK environment for uninstall of '{{ uninst_tenant.display_name }}'"
+  ansible.builtin.shell: >
+    echo "y" | orchestrate env add
+    -n {{ _uninst_env }}
+    -u {{ _uninst_inst_url }}
+    --type cpd
+    --insecure
+  register: _uninst_env_add
+  changed_when: false
+  failed_when: false
+
+- name: "Activate ADK environment for uninstall of '{{ uninst_tenant.display_name }}'"
+  ansible.builtin.command: >
+    orchestrate env activate
+    --username=cpadmin
+    --password={{ cpd_password }}
+    {{ _uninst_env }}
+  register: _uninst_env_activate
+  changed_when: _uninst_env_activate.rc == 0
+  failed_when: false
+
+- name: "Check if ADK environment exists for '{{ uninst_tenant.display_name }}'"
+  ansible.builtin.set_fact:
+    _uninst_env_exists: "{{ _uninst_env_activate.rc == 0 }}"
+
+- name: "Skip tenant '{{ uninst_tenant.display_name }}' — ADK environment not found"
+  when: not _uninst_env_exists
+  block:
+    - name: "Display environment-not-found warning for '{{ uninst_tenant.display_name }}'"
+      ansible.builtin.debug:
+        msg: |
+          SKIPPED  {{ uninst_tenant.display_name }} ({{ uninst_tenant.id }})
+                   Reason: ADK environment '{{ _uninst_env }}' could not be activated.
+                   The model gateway may not have been configured for this tenant.
+
+    - name: "Record skipped tenant '{{ uninst_tenant.display_name }}'"
+      ansible.builtin.set_fact:
+        uninst_skipped: >-
+          {{ hostvars[inventory_hostname]['uninst_skipped'] + [{
+            'name':   uninst_tenant.display_name,
+            'id':     uninst_tenant.id,
+            'reason': "ADK environment '" + _uninst_env + "' not found or could not be activated."
+          }] }}
+
+# ── Steps 2–4 only run when env activation succeeded ─────────────────────────
+
+- name: "Remove model gateway for tenant '{{ uninst_tenant.display_name }}'"
+  when: _uninst_env_exists
+  block:
+
+    # ── Step 2: List and remove all virtual models ────────────────────────────
+
+    - name: "List virtual models for tenant '{{ uninst_tenant.display_name }}'"
+      ansible.builtin.shell: orchestrate models list --raw 2>/dev/null | grep 'virtual-model' || true
+      register: _uninst_models_output
+      failed_when: false
+      changed_when: false
+
+    - name: "Display virtual models for '{{ uninst_tenant.display_name }}'"
+      ansible.builtin.debug:
+        msg: "{{ _uninst_models_output.stdout_lines if _uninst_models_output.stdout_lines else 'No virtual models found' }}"
+
+    - name: "Extract model names for '{{ uninst_tenant.display_name }}'"
+      ansible.builtin.set_fact:
+        _uninst_model_names: >-
+          {{ _uninst_models_output.stdout_lines
+             | map('regex_search', 'virtual-model/[^:\\s]+')
+             | select('string')
+             | list }}
+      when: _uninst_models_output.stdout_lines | length > 0
+
+    - name: "Remove virtual models for tenant '{{ uninst_tenant.display_name }}'"
+      ansible.builtin.command: >
+        orchestrate models remove -n {{ item }}
+      loop: "{{ _uninst_model_names | default([]) }}"
+      register: _uninst_model_remove
+      changed_when: _uninst_model_remove.rc == 0
+      failed_when: >-
+        _uninst_model_remove.rc != 0
+        and 'not found' not in (_uninst_model_remove.stderr | lower)
+        and 'does not exist' not in (_uninst_model_remove.stderr | lower)
+        and 'not found' not in (_uninst_model_remove.stdout | lower)
+        and 'does not exist' not in (_uninst_model_remove.stdout | lower)
+      when: _uninst_model_names | default([]) | length > 0
+
+    # ── Step 3: Remove connection ─────────────────────────────────────────────
+
+    - name: "Remove MGW connection for tenant '{{ uninst_tenant.display_name }}'"
+      ansible.builtin.command: >
+        orchestrate connections remove -a {{ _uninst_connection_name }}
+      register: _uninst_conn_remove
+      changed_when: _uninst_conn_remove.rc == 0
+      # rc=0: removed. 'not found'/'does not exist' in stdout or stderr: already gone (idempotent).
+      # orchestrate CLI prints 404 errors to stdout, not stderr.
+      failed_when: >-
+        _uninst_conn_remove.rc != 0
+        and 'not found' not in (_uninst_conn_remove.stderr | lower)
+        and 'does not exist' not in (_uninst_conn_remove.stderr | lower)
+        and 'not found' not in (_uninst_conn_remove.stdout | lower)
+        and 'does not exist' not in (_uninst_conn_remove.stdout | lower)
+
+    - name: "Display connection removal result for '{{ uninst_tenant.display_name }}'"
+      ansible.builtin.debug:
+        var: _uninst_conn_remove.stdout
+
+    # ── Step 4: Remove ADK environment ───────────────────────────────────────
+
+    - name: "Remove ADK environment for tenant '{{ uninst_tenant.display_name }}'"
+      ansible.builtin.shell: echo "y" | orchestrate env remove -n {{ _uninst_env }}
+      register: _uninst_env_remove
+      changed_when: _uninst_env_remove.rc == 0
+      failed_when: false
+
+    - name: "Display env removal result for '{{ uninst_tenant.display_name }}'"
+      ansible.builtin.debug:
+        var: _uninst_env_remove.stdout
+
+    # ── Record success ────────────────────────────────────────────────────────
+
+    - name: "Record successful uninstall for '{{ uninst_tenant.display_name }}'"
+      ansible.builtin.set_fact:
+        uninst_succeeded: >-
+          {{ hostvars[inventory_hostname]['uninst_succeeded'] + [{
+            'name': uninst_tenant.display_name,
+            'id':   uninst_tenant.id
+          }] }}

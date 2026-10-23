@@ -1,0 +1,10 @@
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  generateName: "{{ fdf_namespace }}-"
+  name: "{{ fdf_operator_group_name }}"
+  namespace: "{{ fdf_namespace }}"
+spec:
+  targetNamespaces:
+    - "{{ fdf_namespace }}"
+  upgradeStrategy: Default

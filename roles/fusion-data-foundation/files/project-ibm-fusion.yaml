@@ -1,0 +1,7 @@
+apiVersion: project.openshift.io/v1
+kind: Project
+metadata:
+  name: "{{ fdf_namespace }}"
+  annotations:
+    openshift.io/display-name: "IBM Spectrum Fusion"
+    openshift.io/description: "Project for IBM Spectrum Fusion Data Foundation Operator and related resources"
